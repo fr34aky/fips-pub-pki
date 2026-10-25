@@ -1,17 +1,20 @@
 //! Policy core of fips-pub-pki (docs/spec.md, docs/nip.md): the rules by
 //! which a key bound to a domain certifies other keys, with no I/O. The
 //! issuer binding itself is `pubdom-core`'s (NIP-DB, the `fips-ca` role);
-//! this crate adds names, certificates, the sub-issuer scope rule and, in
-//! time, path validation, revocation and the offline bundle.
+//! this crate adds names, certificates, the sub-issuer scope rule, path
+//! validation with revocation and anti-rollback, and, in time, the
+//! offline bundle.
 //!
 //! Signature checking is the relay client's job (nostr-sdk verifies on
 //! receipt); here we trust `pubkey`, as `pubdom-core` does.
 
 pub mod cert;
 pub mod name;
+pub mod path;
 
 pub use cert::{CertError, Certificate, Usage};
 pub use name::Name;
+pub use path::{Anchor, AnchorKind, Anchors, Certs, Ignored, Path, PathError, Resolution};
 /// The crate this one builds on, re-exported so consumers use one version.
 pub use pubdom_core;
 
