@@ -181,12 +181,18 @@ verifies a `fips-ca` claim of that issuer for the domain or one above it
 (`claims_of`: the chain through `pubdom_resolve::proof`, or
 `attestations_of` against its configured witnesses) and, on success,
 anchors the key for the claim's domain with the method earned. A
-bare-key issuer (`<npub>.fips`) needs no claim. `validate` then runs §4
-over the bundle's certificates added to what the verifier knows that can
-matter (the entries they collide with, and its sub-issuer certificates,
-so a bundle that left the delegation out still validates for a verifier
-holding it); what the verifier knows wins, so a bundle cannot roll a
-certificate back below a marker or renewal it has seen.
+bare-key issuer (`<npub>.fips`) needs no claim. Every attestation of the
+claim's domain goes into the count, not only those naming the issuer: a
+witness's newer attestation without the key is its withdrawal. `validate`
+then runs §4 over the bundle's certificates added to what the verifier
+knows that can matter (the entries they collide with, and its sub-issuer
+certificates, so a bundle that left the delegation out still validates
+for a verifier holding it); what the verifier knows wins, so a bundle
+cannot roll a certificate back below a marker or renewal it has seen,
+and a link below a floor is named `Superseded` and passed over for the
+next candidate rather than reported as a missing issuer. The size bound
+is checked before any signature. A bundle teaches the verifier only once
+it validated.
 
 ## 8. Signing and encryption
 

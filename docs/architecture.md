@@ -24,7 +24,7 @@ I/O through `pubdom-resolve`, in modules:
 
 | module | what |
 |---|---|
-| `verifier` | `Verifier`: the core tables fed from relays (`fetch_raw` with `#d`/`#p` filters, `RelayScope::Offline`: mesh first) or from a bundle; `anchor_from` (a claim's chain through `DnssecProofs::check_service` earns `Dnssec`, `k` witnesses `Attested`), `fetch_anchor`, `ensure_anchor` (walks `#p` delegations and the domain's ancestors, bounded by `MAX_PATH`), `resolve`, `names_of`, `verify_bundle`, `pin`/`unpin`, `learn`, `save` (prune, trusted authors only, write) |
+| `verifier` | `Verifier`: the core tables fed from relays (`fetch_raw` with `#d`/`#p` filters, `RelayScope::Offline`: mesh first) or from a bundle; `anchor_from` (a claim's chain through `DnssecProofs::check_service` earns `Dnssec`, `k` witnesses `Attested`; future-dated and rolled-back claims and attestations ignored), `fetch_anchor`, `ensure_anchor` (the domain's ancestors first, then `#p` delegations, bounded by `MAX_PATH`, one fetch per domain and key per call), `resolve` and `verify_bundle` (adopt a bare-key issuer by pinning it), `names_of` (adopts nothing), `pin`/`unpin`, `learn`, `save` (prune, trusted authors only, write) |
 | `config` | `/etc/fips-pubpki/config.yaml`: relays, the issuers file, witnesses and `k`, budget, this user's key |
 | `store` | `FileStore`: `Snapshot` as pretty JSON, atomic write, corrupt file an error |
 | `sig` | `sign_detached` / `verify_detached` around `pubpki_core::Signature` |
