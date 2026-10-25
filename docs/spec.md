@@ -47,17 +47,24 @@ As implemented (`pubpki::Verifier::anchor_from`): for each `fips-ca`
 claim of the domain not older than the newest seen for (37197, author,
 domain), the chain is checked with `DnssecProofs::check_service` and
 earns `dnssec`; failing that, `pubpki_core::attesting_witnesses` counts
-the configured witnesses whose attestations name the key in the `fips-ca`
-role for the domain (method `dns` or better, verified within 30 days, not
-from the future, each witness once, the issuer itself no witness) and
-`k` or more earn `attested`; `k = 0` turns attestations off. The pin
-goes through `Snapshot::pin` (§6), so a weaker result never replaces a
-stronger pin. Online, `ensure_anchor` places a certificate's issuer by
-fetching the sub-issuer certificates naming it (`#p`) and, where none
-applies, the claims of the name's domain and its ancestors in turn, up
-to `MAX_PATH` deep; an overlay domain `<npub>.fips` fetches nothing.
-Relays are asked mesh first (`RelayScope::Offline`), the public ones only
-when the mesh had nothing.
+the configured witnesses whose **newest** attestation for the domain
+names the key in the `fips-ca` role (method `dns` or better, verified
+within 30 days, not from the future, the issuer itself no witness): a
+witness that re-published without the key has withdrawn it. `k` or more
+earn `attested`; `k = 0` turns attestations off. Claims and attestations
+dated beyond `MAX_FUTURE_SECS` are ignored, and both have anti-rollback
+in the file: the newest `created_at` seen per (37197, issuer, domain) and
+per (37198, witness, domain), so neither a claim nor an attestation can
+be replayed from before what the verifier has seen. The pin goes through
+`Snapshot::pin` (§6), so a weaker result never replaces a stronger pin.
+Online, `ensure_anchor` places a certificate's issuer by asking for the
+claims of the name's domain and its ancestors first (a directly
+anchorable issuer must not depend on whatever delegations strangers
+publish for it), then for the sub-issuer certificates naming it (`#p`)
+and their issuers in turn, up to `MAX_PATH` deep, each domain and key
+asked for once per lookup; an overlay domain `<npub>.fips` fetches
+nothing. Relays are asked mesh first (`RelayScope::Offline`), the public
+ones only when the mesh had nothing.
 
 ## 3. Names and certificates
 
@@ -146,7 +153,12 @@ file admits trusted authors only: issuers placed for some domain,
 subjects of sub-issuer certificates that validate now, and authors
 already in the file (trusted once, their floors stay, so what they
 revoked stays revoked even after their delegation lapsed); a stranger's
-self-signed `_@…` certificate makes nobody trusted (`is_trusted_author`).
+self-signed `_@…` certificate makes nobody trusted, and neither does a
+bare key's structural anchor for its own `<npub>.fips`, since anyone has
+one (`is_trusted_author`). A bare-key issuer enters the file when the
+user chooses it: the verifier pins it (`pinned`) when a name under it is
+resolved or its bundle verifies, never from an unsolicited certificate
+naming a key (`names_of`).
 `Certs::retain_issuers` bounds the running table the same way, expired
 certificates are pruned with their timestamps kept as floors, and
 `retain_authors` is the operator's explicit forget, never routine.

@@ -13,16 +13,18 @@ use pubdom_resolve::proof::DnssecProofs;
 use pubdom_resolve::relay::RelayScope;
 use pubpki_core::name::overlay_key;
 use pubpki_core::pubdom_core::claim::{Attestation, ServiceClaim};
-use pubpki_core::pubdom_core::{KIND_CLAIM, Npub};
+use pubpki_core::pubdom_core::{KIND_ATTESTATION, KIND_CLAIM, Npub};
 use pubpki_core::{
-    Anchors, Bundle, BundleError, Certificate, Certs, IssuerMethod, IssuerPin, IssuerStore,
-    KIND_CERT, MAX_PATH, Name, Path, PathError, Resolution, SERVICE_CA, SeenKey, Snapshot,
-    attesting_witnesses, certifies, path,
+    AnchorKind, Anchors, Bundle, BundleError, Certificate, Certs, IssuerMethod, IssuerPin,
+    IssuerStore, KIND_CERT, MAX_BUNDLE_EVENTS, MAX_FUTURE_SECS, MAX_PATH, Name, Path, PathError,
+    Resolution, SERVICE_CA, SeenKey, Snapshot, attesting_witnesses, certifies, path,
 };
 use std::collections::HashSet;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
+    #[error("more than {MAX_BUNDLE_EVENTS} events")]
+    TooLarge,
     #[error("event {0}: bad signature: {1}")]
     Signature(usize, String),
     #[error("{0}")]
@@ -46,6 +48,10 @@ pub struct Verifier {
     store: Box<dyn IssuerStore>,
     snap: Snapshot,
     certs: Certs,
+    /// What one `resolve`/`names_of` call has already asked the relays
+    /// for, so spam certificates cannot make it ask again and again.
+    fetched_domains: HashSet<String>,
+    fetched_keys: HashSet<Npub>,
 }
 
 impl Verifier {
@@ -69,6 +75,8 @@ impl Verifier {
             store,
             snap,
             certs,
+            fetched_domains: HashSet::new(),
+            fetched_keys: HashSet::new(),
         })
     }
 
@@ -108,8 +116,10 @@ impl Verifier {
     /// Anchor the `fips-ca` keys of `domain` from claims and attestations
     /// already in hand (fetched, or a bundle's): the chain in a claim
     /// earns `Dnssec`, `k` configured witnesses earn `Attested`. Claims
-    /// rolled back below what was seen are ignored. Returns what was
-    /// anchored by this call.
+    /// and attestations rolled back below what was seen, or dated in the
+    /// future, are ignored; the newest attestation per configured witness
+    /// is remembered, so a withdrawn attestation cannot be replayed.
+    /// Returns what was anchored by this call.
     pub fn anchor_from(
         &mut self,
         domain: &str,
@@ -117,11 +127,36 @@ impl Verifier {
         attestations: &[Attestation],
         now: u64,
     ) -> Vec<Anchored> {
+        let seen_key = |witness: Npub| SeenKey {
+            kind: KIND_ATTESTATION,
+            author: witness,
+            d: domain.to_string(),
+        };
+        let attestations: Vec<Attestation> = attestations
+            .iter()
+            .filter(|a| {
+                a.domain == domain
+                    && self.cfg.witnesses.contains(&a.witness)
+                    && a.created_at <= now + MAX_FUTURE_SECS
+                    && !self
+                        .snap
+                        .newest_seen(&seen_key(a.witness))
+                        .is_some_and(|seen| a.created_at < seen)
+            })
+            .cloned()
+            .collect();
+        for a in &attestations {
+            self.snap.note_seen(seen_key(a.witness), a.created_at, now);
+        }
         let mut out = Vec::new();
         for claim in claims
             .iter()
             .filter(|c| c.domain == domain && c.service == SERVICE_CA)
         {
+            if claim.created_at > now + MAX_FUTURE_SECS {
+                tracing::debug!(domain, issuer = %claim.author, "claim from the future; ignored");
+                continue;
+            }
             let key = SeenKey {
                 kind: KIND_CLAIM,
                 author: claim.author,
@@ -143,7 +178,7 @@ impl Verifier {
                     let who = attesting_witnesses(
                         domain,
                         &claim.author,
-                        attestations,
+                        &attestations,
                         &self.cfg.witnesses,
                         now,
                     );
@@ -190,9 +225,10 @@ impl Verifier {
 
     /// Fetch `domain`'s `fips-ca` claims and the configured witnesses'
     /// attestations, and anchor what they prove. For a bare-key overlay
-    /// domain nothing is fetched: the key anchors itself.
+    /// domain nothing is fetched: the key anchors itself. Once per domain
+    /// and call.
     pub async fn fetch_anchor(&mut self, domain: &str, now: u64) -> Vec<Anchored> {
-        if overlay_key(domain).is_some() {
+        if overlay_key(domain).is_some() || !self.fetched_domains.insert(domain.to_string()) {
             return Vec::new();
         }
         let claims: Vec<ServiceClaim> = self
@@ -219,14 +255,30 @@ impl Verifier {
     }
 
     /// Make sure `issuer` can be placed for `domain`: anchored already, or
-    /// anchored now from the claims of `domain` or a domain above it, or
-    /// certified by a sub-issuer certificate (fetched by `#p`) whose own
-    /// issuer is placed the same way. Bounded by `MAX_PATH`.
+    /// anchored now from the claims of `domain` or a domain above it
+    /// (asked first: a directly anchorable issuer must not depend on
+    /// whatever delegations strangers publish for it), or certified by a
+    /// sub-issuer certificate (fetched by `#p`) whose own issuer is placed
+    /// the same way. Bounded by `MAX_PATH`; each domain and key is asked
+    /// for once per call.
     async fn ensure_anchor(&mut self, issuer: Npub, domain: &str, now: u64, depth: usize) {
         if self.snap.anchors().anchor_for(&issuer, domain).is_some() || depth >= MAX_PATH {
             return;
         }
-        if let Ok(pk) = PublicKey::from_slice(issuer.as_bytes()) {
+        let mut scope = domain;
+        while scope.contains('.') {
+            self.fetch_anchor(scope, now).await;
+            if self.snap.anchors().anchor_for(&issuer, domain).is_some() {
+                return;
+            }
+            let Some((_, rest)) = scope.split_once('.') else {
+                break;
+            };
+            scope = rest;
+        }
+        if self.fetched_keys.insert(issuer)
+            && let Ok(pk) = PublicKey::from_slice(issuer.as_bytes())
+        {
             self.fetch_certs(Self::cert_filter().pubkey(pk), now).await;
         }
         let certifiers: Vec<(Npub, String)> = self
@@ -235,40 +287,46 @@ impl Verifier {
             .filter(|s| certifies(s, &issuer, domain) && s.is_live_at(now))
             .map(|s| (s.issuer, s.name.domain.clone()))
             .collect();
-        if certifiers.is_empty() {
-            // Walk up to where a claim could place the issuer directly.
-            let mut scope = domain;
-            while scope.contains('.') {
-                self.fetch_anchor(scope, now).await;
-                if self.snap.anchors().anchor_for(&issuer, domain).is_some() {
-                    return;
-                }
-                let Some((_, rest)) = scope.split_once('.') else {
-                    break;
-                };
-                scope = rest;
-            }
-            return;
-        }
         for (ca_issuer, ca_domain) in certifiers {
             Box::pin(self.ensure_anchor(ca_issuer, &ca_domain, now, depth + 1)).await;
         }
     }
 
+    /// A bare key on the overlay anchors itself by structure, but it
+    /// enters the file only when the user chose it: by resolving a name
+    /// under it, or by verifying its bundle. Then it is pinned, and what
+    /// it issues and revokes is remembered.
+    fn adopt_overlay(&mut self, path: &Path, now: u64) {
+        if path.anchor.kind == AnchorKind::Overlay {
+            self.pin(&path.anchor.domain.clone(), path.anchor.issuer, now);
+        }
+    }
+
     /// Resolve `name` from the relays and what is known (spec §4).
     pub async fn resolve(&mut self, name: &Name, now: u64) -> Resolution {
+        self.fetched_domains.clear();
+        self.fetched_keys.clear();
         self.fetch_certs(Self::cert_filter().identifier(name.to_string()), now)
             .await;
         let issuers: Vec<Npub> = self.certs.by_name(name).map(|c| c.issuer).collect();
         for issuer in issuers {
             self.ensure_anchor(issuer, &name.domain, now, 0).await;
         }
-        path::resolve(&self.certs, &self.snap.anchors(), name, now)
+        let r = path::resolve(&self.certs, &self.snap.anchors(), name, now);
+        if let Resolution::Verified(p) = &r {
+            self.adopt_overlay(p, now);
+        }
+        r
     }
 
     /// The names `key` validly holds, from the relays and what is known.
+    /// Nothing is adopted here: a certificate naming a key is unsolicited.
     pub async fn names_of(&mut self, key: &Npub, now: u64) -> Vec<Path> {
-        if let Ok(pk) = PublicKey::from_slice(key.as_bytes()) {
+        self.fetched_domains.clear();
+        self.fetched_keys.clear();
+        if self.fetched_keys.insert(*key)
+            && let Ok(pk) = PublicKey::from_slice(key.as_bytes())
+        {
             self.fetch_certs(Self::cert_filter().pubkey(pk), now).await;
         }
         let pending: Vec<(Npub, String)> = self
@@ -286,6 +344,9 @@ impl Verifier {
     /// then the issuer anchored from the bundle's own claim and
     /// attestations, then path validation against what is known.
     pub fn verify_bundle(&mut self, events: &[Event], now: u64) -> Result<Path, VerifyError> {
+        if events.len() > MAX_BUNDLE_EVENTS {
+            return Err(VerifyError::TooLarge);
+        }
         for (i, ev) in events.iter().enumerate() {
             ev.verify()
                 .map_err(|e| VerifyError::Signature(i, e.to_string()))?;
@@ -306,8 +367,12 @@ impl Verifier {
                     .filter(|c| c.domain == d)
                     .cloned()
                     .collect();
+                // Every attestation for the domain, not only those naming
+                // the issuer: a witness's newer one without the key is a
+                // withdrawal, and it must be seen to count against it.
                 let attestations: Vec<Attestation> = bundle
-                    .attestations_of(issuer, &domain)
+                    .attestations
+                    .iter()
                     .filter(|a| a.domain == d)
                     .cloned()
                     .collect();
@@ -319,6 +384,7 @@ impl Verifier {
         for c in &bundle.certs {
             self.learn(c.clone(), now);
         }
+        self.adopt_overlay(&path, now);
         Ok(path)
     }
 
@@ -418,11 +484,34 @@ mod tests {
             v.verify_bundle(&[signed(&other, KIND_CERT, bad.tags())], NOW()),
             Err(VerifyError::Path(PathError::NoIssuer))
         ));
-        // Only the bundle that validated taught anything; saving keeps
-        // its certificate, since its issuer is anchored by structure.
+        // Only the bundle that validated taught anything; the user chose
+        // this issuer by verifying its bundle, so it is pinned and kept.
         assert_eq!(v.certs().len(), 1);
+        assert_eq!(v.snapshot().issuers.len(), 1);
+        assert_eq!(v.snapshot().issuers[0].domain, domain);
         v.save(NOW()).unwrap();
         assert!(v.certs().by_name(&c.name).next().is_some());
+        // An unsolicited certificate naming a key, from a key nobody
+        // chose, is answered but not kept.
+        let stranger = Keys::generate();
+        let s = cert(
+            &stranger,
+            &format!("alice@{}", npub_of(&stranger).fips_name()),
+            &alice,
+            &[],
+        );
+        v.learn(s.clone(), NOW());
+        assert_eq!(v.names_of(&npub_of(&alice), NOW()).await.len(), 2);
+        v.save(NOW()).unwrap();
+        assert!(v.certs().by_name(&s.name).next().is_none(), "not kept");
+        assert_eq!(v.snapshot().issuers.len(), 1, "not pinned");
+        // Resolving the name is choosing the issuer.
+        v.learn(s.clone(), NOW());
+        assert!(matches!(
+            v.resolve(&s.name, NOW()).await,
+            Resolution::Verified(_)
+        ));
+        assert_eq!(v.snapshot().issuers.len(), 2);
     }
 
     #[tokio::test]
@@ -541,6 +630,49 @@ mod tests {
             Err(VerifyError::Path(PathError::NoIssuer))
         ));
         assert!(v.snapshot().issuers.is_empty());
+        // A claim from the future anchors nothing, whatever vouches for it.
+        let mut v = verifier(cfg.clone()).await;
+        let future = signed_at(
+            &issuer,
+            KIND_CLAIM,
+            ServiceClaim::tags("example.org", SERVICE_CA, None, None),
+            NOW() + MAX_FUTURE_SECS + 5,
+        );
+        let late = [
+            bundle[0].clone(),
+            future,
+            bundle[2].clone(),
+            bundle[3].clone(),
+        ];
+        assert!(v.verify_bundle(&late, NOW()).is_err());
+        assert!(v.snapshot().issuers.is_empty());
+        // A witness that re-published without the key has withdrawn it,
+        // and once seen, its older attestation is a replay.
+        let mut v = verifier(cfg.clone()).await;
+        let withdrawn = signed_at(
+            &w2,
+            KIND_ATTESTATION,
+            Attestation::tags_with(
+                "example.org",
+                &[npub_of(&alice)],
+                &[],
+                Method::Dnssec,
+                NOW(),
+            ),
+            NOW() + 1,
+        );
+        let gone = [
+            bundle[0].clone(),
+            bundle[1].clone(),
+            bundle[2].clone(),
+            withdrawn,
+        ];
+        assert!(v.verify_bundle(&gone, NOW()).is_err());
+        assert!(v.snapshot().issuers.is_empty());
+        assert!(
+            v.verify_bundle(&bundle, NOW()).is_err(),
+            "the day-1 attestation replayed after the withdrawal was seen"
+        );
         // Attestations off: a chainless claim anchors nothing.
         let mut v = verifier(Config {
             attestation_threshold: 0,

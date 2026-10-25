@@ -107,22 +107,16 @@ impl Bundle {
             // if the path needs them, named by validate.
             let _ = table.insert(c.clone(), now);
         }
-        let path = validate(&table, anchors, self.cert(), now)?;
-        // The floors (what was seen, certificate gone) are checked on the
-        // path found, so a stale link is named rather than merely missing.
-        for (i, c) in path.certs.iter().enumerate() {
-            if known
-                .newest_seen(&c.issuer, &c.name)
-                .is_some_and(|seen| seen > c.created_at)
-            {
-                let mut e = PathError::Superseded;
-                for s in path.certs[1..=i].iter().rev() {
-                    e = PathError::Via(s.name.to_string(), Box::new(e));
-                }
-                return Err(e);
+        // The floors (what was seen, certificate gone) go on after the
+        // bundle's certificates are in, so a stale link is still a
+        // candidate that validate names as superseded and passes over
+        // for the next one, rather than one missing without a word.
+        for c in &self.certs {
+            if let Some(at) = known.newest_seen(&c.issuer, &c.name) {
+                table.set_floor(c.issuer, c.name.clone(), at);
             }
         }
-        Ok(path)
+        validate(&table, anchors, self.cert(), now)
     }
 
     /// The `fips-ca` claims of `issuer` that cover `domain`: for the
@@ -371,6 +365,18 @@ mod tests {
             b.validate(&known, &anchors, NOW),
             Err(PathError::Superseded)
         );
+        // A stale delegation in the bundle does not hide a valid one from
+        // another anchored key.
+        let mut root2_ca = cert(8, "_@example.org", 2, &[Usage::Ca]);
+        root2_ca.created_at -= 100;
+        let with_alt =
+            Bundle::from_events(&[event(&alice), event(&root_ca), event(&root2_ca)]).unwrap();
+        let mut known = Certs::new();
+        known.set_floor(key(1), name("_@example.org"), NOW);
+        let mut anchors2 = anchors.clone();
+        anchors2.add("example.org", key(8));
+        let p = with_alt.validate(&known, &anchors2, NOW).unwrap();
+        assert_eq!(p.anchor.issuer, key(8));
         // A verifier that already holds the delegation validates a bundle
         // that left it out; unrelated known certificates play no part.
         let mut known = Certs::new();

@@ -7,12 +7,11 @@ use pubpki_core::{IssuerStore, Snapshot};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct FileStore {
     path: PathBuf,
+    /// Writers are serialized, so one temp name per process suffices.
     saving: Mutex<()>,
-    seq: AtomicU64,
 }
 
 impl FileStore {
@@ -20,7 +19,6 @@ impl FileStore {
         Self {
             path: path.into(),
             saving: Mutex::new(()),
-            seq: AtomicU64::new(0),
         }
     }
 
@@ -46,10 +44,9 @@ impl FileStore {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        let n = self.seq.fetch_add(1, Ordering::Relaxed);
         let tmp = self
             .path
-            .with_extension(format!("json.{}.{n}.tmp", std::process::id()));
+            .with_extension(format!("json.{}.tmp", std::process::id()));
         let bytes = serde_json::to_vec_pretty(snap).map_err(io::Error::other)?;
         let result = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &self.path));
         if result.is_err() {

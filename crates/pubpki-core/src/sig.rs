@@ -96,12 +96,12 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if !s.len().is_multiple_of(2) {
+    if !s.is_ascii() || !s.len().is_multiple_of(2) {
         return None;
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+    s.as_bytes()
+        .chunks(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
         .collect()
 }
 
@@ -163,6 +163,13 @@ mod tests {
         let mut e = good.clone();
         e.tags[0][1].truncate(62);
         assert_eq!(Signature::parse(&e), Err(SigError::Digest), "31 bytes");
+        let mut e = good.clone();
+        e.tags[0][1] = "€a".repeat(16);
+        assert_eq!(
+            Signature::parse(&e),
+            Err(SigError::Digest),
+            "non-ASCII of even byte length is refused, not a panic"
+        );
         let mut e = good.clone();
         e.tags.remove(0);
         assert_eq!(Signature::parse(&e), Err(SigError::Digest));
