@@ -30,12 +30,15 @@ validation after expiry.
 
 ## Status
 
-Day one (2026-10-25). The protocol is drafted in [docs/nip.md](docs/nip.md)
-(NIP-DC, Domain Certificates), the issuer binding is live in
-fips-pub-domains (its `fips-ca` role), and `pubpki-core` parses names and
-certificates with the sub-issuer scope rule under test. Path validation,
-revocation, the offline bundle, the CLI and the live tests follow in
-[docs/roadmap.md](docs/roadmap.md)'s order.
+2026-10-25: the protocol is drafted in [docs/nip.md](docs/nip.md)
+(NIP-DC, Domain Certificates); the issuer binding is live in
+fips-pub-domains (its `fips-ca` role); `pubpki-core` has path validation,
+revocation, anti-rollback, the store and the bundle under table tests;
+`pubpki` fetches, anchors and verifies; `fips-pubpki` issues, renews,
+revokes, resolves, verifies bundles, signs and encrypts, and has run end
+to end offline with a bare-key issuer. Not yet done: the live tests on
+the mesh with a public domain, the phone, kind registration and the NIP
+submission ([docs/roadmap.md](docs/roadmap.md)).
 
 ## Components
 
@@ -51,10 +54,28 @@ revocation, the offline bundle, the CLI and the live tests follow in
 git clone https://github.com/fr34aky/fips-pub-pki.git
 cd fips-pub-pki
 cargo test --workspace      # no network needed
+cargo build --release       # target/release/fips-pubpki
+```
+
+Then [docs/install.md](docs/install.md) for an issuer or a user machine.
+A bare-key issuer needs no domain and no relay to try it out:
+
+```bash
+fips-pubpki --config ca.yaml ca init                       # prints <npub>.fips
+fips-pubpki --config ca.yaml ca issue alice@<npub>.fips --subject npub1alice… --no-publish
+fips-pubpki --config user.yaml verify alice.json           # the event from issued.json
 ```
 
 ## Documents
 
+- [docs/how-it-works.md](docs/how-it-works.md) — from a name to a key,
+  every trust step named; what DNS and relays can and cannot do.
+- [docs/install.md](docs/install.md) — install, configure, upgrade,
+  uninstall; the renewal unit.
+- [docs/issuer.md](docs/issuer.md) — running an issuer: key, record,
+  claim, issuing, sub-issuers, renewal, revocation, witnesses.
+- [docs/users.md](docs/users.md) — resolving, pins, offline bundles,
+  signing, encrypting, the file, troubleshooting.
 - [docs/nip.md](docs/nip.md) — the protocol as a NIP draft.
 - [docs/spec.md](docs/spec.md) — the protocol as this implementation
   applies it: precedence, path validation, storage, the bundle.

@@ -41,19 +41,24 @@ impl FileStore {
 
     fn write(&self, snap: &Snapshot) -> io::Result<()> {
         let _serialized = self.saving.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = self
-            .path
-            .with_extension(format!("json.{}.tmp", std::process::id()));
         let bytes = serde_json::to_vec_pretty(snap).map_err(io::Error::other)?;
-        let result = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &self.path));
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
-        result
+        write_atomic(&self.path, &bytes)
     }
+}
+
+/// Write `bytes` to `path` through a temp file and a rename, creating the
+/// directory; a crash leaves the old file or none, never a torn one.
+/// Callers that may write concurrently serialize themselves.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let result = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 impl IssuerStore for FileStore {

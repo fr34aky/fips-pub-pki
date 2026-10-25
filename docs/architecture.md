@@ -30,6 +30,7 @@ I/O through `pubdom-resolve`, in modules:
 | `sig` | `sign_detached` / `verify_detached` around `pubpki_core::Signature` |
 | `crypto` | NIP-44 v2 `encrypt` / `decrypt` to a key, `npub_of` |
 | `bundle` | the bundle as a JSON array of events; every signature verified on parse |
+| `issuer` | `Issuer` (key and domain; `issue` from a `Request`, `renew` and `revoke` dated after what they replace, `claim` with the chain, `nostr_json`, the TXT record text), `Issued` (the issued file, newest per name), `sign_at` (explicit timestamp, self-tagging allowed: nostr-sdk drops a `p` naming the author otherwise), `publish_signed` (the exact stored event) |
 
 `core_event` reduces a relay event to the core crates' view. The verifier
 never queries DNS; `TxtVerifier::lookup_service` and `build_chain_for`
@@ -37,10 +38,15 @@ are for the issuer tooling (the `ca` commands), which comes next.
 
 ### pubpki-cli
 
-`fips-pubpki`: `ca init|issue|issue-ca|renew|revoke|publish|status`,
-`resolve`, `verify [--bundle]`, `sign`, `verify-sig`, `encrypt`,
-`decrypt`, `bundle`, `nostr-json`. Config `/etc/fips-pubpki/`. The issuer
-key is its own file (not `/etc/fips/fips.key` by default), group `fips`.
+`fips-pubpki`, one file over `pubpki`: `ca init|issue|issue-ca|renew
+[--watch]|revoke|publish|status [--dns]`, `issuer add|remove|list`,
+`resolve`, `names`, `verify <file>` (a bundle or one event), `bundle`,
+`sign`, `verify-sig`, `encrypt`, `decrypt`, `nostr-json`, `config`.
+Config `/etc/fips-pubpki/config.yaml`; the issuer key is its own file
+(`ca_key`, written by `ca init` with mode 0600), never the node key.
+`ca status --dns` and `ca publish` are the only commands that touch the
+legacy DNS, and they are the issuer's. The renewal unit is
+`packaging/systemd/fips-pubpki-ca.service`.
 
 ### Dependencies
 

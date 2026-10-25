@@ -18,7 +18,10 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
 thiserror.workspace = true
+# The timer only, for publishing with a deadline; pubdom-resolve brings
+# the same tokio already.
+tokio = { version = "1", features = ["time"] }
 tracing.workspace = true
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }

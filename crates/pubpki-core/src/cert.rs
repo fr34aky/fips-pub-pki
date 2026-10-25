@@ -55,6 +55,19 @@ impl Usage {
     }
 }
 
+impl std::str::FromStr for Usage {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| format!("{s}: usage is sign, encrypt or ca"))
+    }
+}
+
+impl std::fmt::Display for Usage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Kind 37200: "`issuer` says `name` is `subjects`, until `expiration`".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Certificate {

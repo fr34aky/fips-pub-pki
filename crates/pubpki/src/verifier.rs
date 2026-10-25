@@ -353,6 +353,13 @@ impl Verifier {
         }
         let core: Vec<_> = events.iter().map(core_event).collect();
         let bundle = Bundle::from_events(&core)?;
+        // Learnt before validation: a marker or renewal from an issuer the
+        // verifier trusts is knowledge whether or not this bundle's path
+        // holds (a revocation often arrives as exactly such a bundle);
+        // what strangers published is forgotten at save.
+        for c in &bundle.certs {
+            self.learn(c.clone(), now);
+        }
         for (issuer, domain) in bundle.anchors_needed() {
             if self.snap.anchors().anchor_for(&issuer, &domain).is_some() {
                 continue;
@@ -381,11 +388,81 @@ impl Verifier {
         }
         let anchors: Anchors = self.snap.anchors();
         let path = bundle.validate(&self.certs, &anchors, now)?;
-        for c in &bundle.certs {
-            self.learn(c.clone(), now);
-        }
         self.adopt_overlay(&path, now);
         Ok(path)
+    }
+
+    /// The offline bundle for `name` (spec §7): the signed events of the
+    /// path `resolve` finds, the anchored issuer's claim and the configured
+    /// witnesses' attestations, fetched again as full events. Fails when
+    /// the name does not resolve or a link cannot be fetched.
+    pub async fn bundle_for(&mut self, name: &Name, now: u64) -> Result<Vec<Event>, String> {
+        let path = match self.resolve(name, now).await {
+            Resolution::Verified(p) => p,
+            Resolution::Disputed(_) => return Err(format!("{name}: disputed")),
+            Resolution::Refused(r) => {
+                return Err(match r.first() {
+                    Some((_, e)) => format!("{name}: {e}"),
+                    None => format!("{name}: refused"),
+                });
+            }
+            Resolution::Unknown => return Err(format!("{name}: no certificate found")),
+        };
+        let mut out = Vec::new();
+        for c in &path.certs {
+            let pk = PublicKey::from_slice(c.issuer.as_bytes()).map_err(|e| e.to_string())?;
+            let filter = Filter::new()
+                .kind(Kind::from(KIND_CERT))
+                .identifier(c.name.to_string())
+                .author(pk)
+                .limit(4);
+            let ev = self
+                .relays
+                .fetch_raw(filter, RelayScope::Offline)
+                .await
+                .into_iter()
+                .max_by_key(|e| e.created_at)
+                .ok_or_else(|| format!("{}: certificate not fetched", c.name))?;
+            out.push(ev);
+        }
+        if path.anchor.kind == AnchorKind::Pinned && overlay_key(&path.anchor.domain).is_none() {
+            let pk =
+                PublicKey::from_slice(path.anchor.issuer.as_bytes()).map_err(|e| e.to_string())?;
+            let filter = Filter::new()
+                .kind(Kind::from(KIND_CLAIM))
+                .identifier(&path.anchor.domain)
+                .author(pk)
+                .limit(4);
+            if let Some(claim) = self
+                .relays
+                .fetch_raw(filter, RelayScope::Offline)
+                .await
+                .into_iter()
+                .max_by_key(|e| e.created_at)
+            {
+                out.push(claim);
+            } else {
+                tracing::warn!(domain = %path.anchor.domain, "issuer claim not fetched; the bundle verifies only where the issuer is pinned");
+            }
+            if !self.cfg.witnesses.is_empty() {
+                let authors: Vec<PublicKey> = self
+                    .cfg
+                    .witnesses
+                    .iter()
+                    .filter_map(|w| PublicKey::from_slice(w.as_bytes()).ok())
+                    .collect();
+                let filter = Filter::new()
+                    .kind(Kind::from(KIND_ATTESTATION))
+                    .identifier(&path.anchor.domain)
+                    .authors(authors)
+                    .limit(32);
+                out.extend(self.relays.fetch_raw(filter, RelayScope::Offline).await);
+            }
+        }
+        if out.len() > MAX_BUNDLE_EVENTS {
+            out.truncate(MAX_BUNDLE_EVENTS);
+        }
+        Ok(out)
     }
 
     /// Prune, keep trusted authors only, write the file.
@@ -484,13 +561,48 @@ mod tests {
             v.verify_bundle(&[signed(&other, KIND_CERT, bad.tags())], NOW()),
             Err(VerifyError::Path(PathError::NoIssuer))
         ));
-        // Only the bundle that validated taught anything; the user chose
-        // this issuer by verifying its bundle, so it is pinned and kept.
-        assert_eq!(v.certs().len(), 1);
+        // Both were learnt; the user chose the first issuer by verifying
+        // its bundle, so it is pinned and its certificate kept, while the
+        // other key's is forgotten at save.
+        assert_eq!(v.certs().len(), 2);
         assert_eq!(v.snapshot().issuers.len(), 1);
         assert_eq!(v.snapshot().issuers[0].domain, domain);
         v.save(NOW()).unwrap();
+        assert_eq!(v.certs().len(), 1);
         assert!(v.certs().by_name(&c.name).next().is_some());
+        // A marker in a bundle that fails (it is revoked) is still learnt
+        // from a trusted issuer: the older certificate is refused after.
+        let mut marker = c.clone();
+        marker.revoked = Some("lost".into());
+        let marker_ev = signed_at(
+            &issuer,
+            KIND_CERT,
+            marker.tags(),
+            ev.created_at.as_secs() + 1,
+        );
+        assert!(matches!(
+            v.verify_bundle(std::slice::from_ref(&marker_ev), NOW()),
+            Err(VerifyError::Path(PathError::Revoked(_)))
+        ));
+        assert!(matches!(
+            v.verify_bundle(std::slice::from_ref(&ev), NOW()),
+            Err(VerifyError::Path(PathError::Revoked(_)))
+        ));
+        // And it survives a restart through the file, certificate included.
+        v.save(NOW()).unwrap();
+        let snap = v.snapshot().clone();
+        assert_eq!(snap.certs.len(), 1, "the marker, as the newest");
+        let mut v2 = Verifier::with_store(Config::default(), Box::new(MemoryStore::new(snap)))
+            .await
+            .unwrap();
+        assert!(matches!(
+            v2.verify_bundle(std::slice::from_ref(&ev), NOW()),
+            Err(VerifyError::Path(PathError::Revoked(_)))
+        ));
+        assert!(matches!(
+            v2.resolve(&c.name, NOW()).await,
+            Resolution::Refused(_)
+        ));
         // An unsolicited certificate naming a key, from a key nobody
         // chose, is answered but not kept.
         let stranger = Keys::generate();
@@ -501,7 +613,11 @@ mod tests {
             &[],
         );
         v.learn(s.clone(), NOW());
-        assert_eq!(v.names_of(&npub_of(&alice), NOW()).await.len(), 2);
+        assert_eq!(
+            v.names_of(&npub_of(&alice), NOW()).await.len(),
+            1,
+            "the stranger's only: alice's own was revoked above"
+        );
         v.save(NOW()).unwrap();
         assert!(v.certs().by_name(&s.name).next().is_none(), "not kept");
         assert_eq!(v.snapshot().issuers.len(), 1, "not pinned");
@@ -554,7 +670,19 @@ mod tests {
             signed(&online, KIND_CERT, a.tags()),
             signed_at(&root, KIND_CERT, root_ca.tags(), seen_at - 1),
         ];
-        let r = v2.verify_bundle(&stale, NOW());
+        // The file carries the newer delegation, so the path validates
+        // through it and the bundle's stale copy is simply not used.
+        let p = v2.verify_bundle(&stale, NOW()).unwrap();
+        assert_eq!(p.certs[1].created_at, seen_at);
+        // With only the floors (an older file, or pruned), the stale copy
+        // is named as superseded.
+        let mut floors_only = v2.snapshot().clone();
+        floors_only.certs.clear();
+        let mut v3 =
+            Verifier::with_store(Config::default(), Box::new(MemoryStore::new(floors_only)))
+                .await
+                .unwrap();
+        let r = v3.verify_bundle(&stale, NOW());
         assert!(
             matches!(
                 &r,
@@ -681,19 +809,27 @@ mod tests {
         .await;
         assert!(v.verify_bundle(&bundle, NOW()).is_err());
         // Without relays, resolving finds nothing beyond what is known,
-        // cleanly; a learnt certificate whose issuer is never placed is
-        // refused, not unknown.
+        // cleanly: the bundle's certificate was learnt, its issuer never
+        // placed, so the name is refused, not unknown.
+        let r = v
+            .resolve(&Name::parse("alice@example.org").unwrap(), NOW())
+            .await;
+        assert!(
+            matches!(&r, Resolution::Refused(list)
+                if list.len() == 1 && list[0].0.name == c.name && list[0].1 == PathError::NoIssuer),
+            "{r:?}"
+        );
         assert_eq!(
-            v.resolve(&Name::parse("alice@example.org").unwrap(), NOW())
+            v.resolve(&Name::parse("nobody@example.org").unwrap(), NOW())
                 .await,
             Resolution::Unknown
         );
-        v.learn(c.clone(), NOW());
-        assert_eq!(
-            v.resolve(&Name::parse("alice@example.org").unwrap(), NOW())
-                .await,
-            Resolution::Refused(vec![(c, PathError::NoIssuer)])
-        );
         assert!(v.names_of(&npub_of(&alice), NOW()).await.is_empty());
+        assert!(
+            v.bundle_for(&Name::parse("alice@example.org").unwrap(), NOW())
+                .await
+                .unwrap_err()
+                .contains("issuer not anchored")
+        );
     }
 }

@@ -8,17 +8,21 @@
 //! - [`sig`]: detached signatures as events (spec §8).
 //! - [`crypto`]: NIP-44 to a key (spec §8).
 //! - [`bundle`]: the bundle as JSON, signatures checked on the way in.
+//! - [`issuer`]: the issuer's key, domain and file; issue, renew, revoke,
+//!   the claim, publishing the exact signed event.
 //!
 //! No `cfg(target_os)` here (docs/architecture.md).
 
 pub mod bundle;
 pub mod config;
 pub mod crypto;
+pub mod issuer;
 pub mod sig;
 pub mod store;
 pub mod verifier;
 
 pub use config::Config;
+pub use issuer::{Issued, Issuer, Request, publish_signed, sign_at};
 pub use pubdom_resolve;
 pub use pubdom_resolve::nostr_sdk;
 pub use pubdom_resolve::relay::load_keys;

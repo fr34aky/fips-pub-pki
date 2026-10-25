@@ -27,23 +27,24 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
   retention and the file), `Config`, `FileStore`, NIP-44, detached
   signatures, the bundle as JSON; tested offline with signed events
   (bare key, pinned issuer with delegation and rollback, witnesses).
+- 2026-10-25: `fips-pubpki` — `ca init|issue|issue-ca|renew [--watch]|
+  revoke|publish|status`, `issuer add|remove|list`, `resolve`, `names`,
+  `verify`, `bundle`, `sign`, `verify-sig`, `encrypt`, `decrypt`,
+  `nostr-json`; the issuer side of `pubpki` (`Issuer`, `Issued`,
+  `sign_at`, `publish_signed`); the renewal unit; the verifier's file
+  keeps trusted certificates; install, issuer, user and how-it-works
+  guides. Run end to end offline with a bare-key issuer
+  ([testing.md](testing.md) level 1).
 
 ## Next, in order
 
-1. **`fips-pubpki`** — `ca init|issue|issue-ca|renew|revoke|publish|status`,
-   `resolve`, `verify [--bundle]`, `bundle`, `sign`, `verify-sig`,
-   `encrypt`, `decrypt`, `nostr-json`. `ca renew --watch` re-issues
-   every live certificate halfway through its remaining validity, the
-   loop `fips-pubdom-server` runs for its chain: automatic renewal is
-   issuer-driven and needs no protocol change (an addressable event
-   re-published with a later `created_at`).
-2. **Live** (each on the user's word): a `_fips-ca` record for the demo
+1. **Live** (each on the user's word): a `_fips-ca` record for the demo
    domain and an issuer claim with its chain; certificates on the mesh
    relay; an offline verification on the second node with no Internet;
    a bare-key issuer with no domain.
-3. **Phone**: `name@domain` in fips2go's contacts with its own issuer
+2. **Phone**: `name@domain` in fips2go's contacts with its own issuer
    pins; no sign/encrypt tooling in the resolver.
-4. **Registration and the NIP**: kind numbers and the NIP-DC submission,
+3. **Registration and the NIP**: kind numbers and the NIP-DC submission,
    on the user's word, after the reference implementation.
 
 ## Later
@@ -60,7 +61,12 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
 ## Open questions
 
 - Whether `fips-pubdom-server` should publish the domain's `fips-ca`
-  claim on the issuer's behalf, or the issuer tooling alone.
+  claim on the issuer's behalf, or the issuer tooling alone; today
+  `ca publish` does it once, and nothing refreshes the chain in the
+  claim before its RRSIGs expire (a `--watch` for the claim, or the
+  domain server's loop).
+- A release workflow and archives, as fips-pub-domains has; until
+  then [install.md](install.md) builds from source.
 - Whether `nostr.json` emission belongs in the CLI or in the domain
   server's web root.
 - Multi-recipient encryption: leave to applications (NIP-59) or offer a
