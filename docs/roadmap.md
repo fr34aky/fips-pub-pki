@@ -21,29 +21,29 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
   that bounds the file) and `pubpki_core::bundle` (sort, per-event
   errors, validation against what is known, what the I/O crate must
   verify); eight tests.
+- 2026-10-25: `pubpki_core::sig` and `anchoring`; the `pubpki` crate —
+  `Verifier` (relay fetch by `#d`/`#p`, anchoring from claims and
+  witnesses, `ensure_anchor`, `resolve`, `names_of`, `verify_bundle`,
+  retention and the file), `Config`, `FileStore`, NIP-44, detached
+  signatures, the bundle as JSON; tested offline with signed events
+  (bare key, pinned issuer with delegation and rollback, witnesses).
 
 ## Next, in order
 
-1. **`pubpki`** — relay fetch of kind 37200 by `#d` and `#p` through
-   `fetch_raw`, the issuer's claim and chain through `pubdom-resolve`
-   (anchoring with the method earned), the issuer file on disk as a
-   `FileStore` written atomically, bundle signature checks, NIP-44
-   helpers, detached signatures (`pubpki_core::sig` first, if it stays
-   policy-only).
-2. **`fips-pubpki`** — `ca init|issue|issue-ca|renew|revoke|publish|status`,
+1. **`fips-pubpki`** — `ca init|issue|issue-ca|renew|revoke|publish|status`,
    `resolve`, `verify [--bundle]`, `bundle`, `sign`, `verify-sig`,
    `encrypt`, `decrypt`, `nostr-json`. `ca renew --watch` re-issues
    every live certificate halfway through its remaining validity, the
    loop `fips-pubdom-server` runs for its chain: automatic renewal is
    issuer-driven and needs no protocol change (an addressable event
    re-published with a later `created_at`).
-3. **Live** (each on the user's word): a `_fips-ca` record for the demo
+2. **Live** (each on the user's word): a `_fips-ca` record for the demo
    domain and an issuer claim with its chain; certificates on the mesh
    relay; an offline verification on the second node with no Internet;
    a bare-key issuer with no domain.
-4. **Phone**: `name@domain` in fips2go's contacts with its own issuer
+3. **Phone**: `name@domain` in fips2go's contacts with its own issuer
    pins; no sign/encrypt tooling in the resolver.
-5. **Registration and the NIP**: kind numbers and the NIP-DC submission,
+4. **Registration and the NIP**: kind numbers and the NIP-DC submission,
    on the user's word, after the reference implementation.
 
 ## Later

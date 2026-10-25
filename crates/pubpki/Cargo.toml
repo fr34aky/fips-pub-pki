@@ -11,7 +11,14 @@ description = "I/O for fips-pub-pki: relays, issuer proofs and keys through pubd
 [dependencies]
 pubpki-core.workspace = true
 pubdom-resolve.workspace = true
+# The same nostr-sdk pubdom-resolve re-exports (cargo unifies the one
+# version); named here only to switch NIP-44 on.
+nostr-sdk = { version = "0.44", default-features = false, features = ["nip44"] }
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }

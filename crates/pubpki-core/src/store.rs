@@ -212,7 +212,11 @@ impl Snapshot {
     /// an author already in the file (trusted once, its floors stay so
     /// what it revoked stays revoked), or the subject of a sub-issuer
     /// certificate that validates now. A stranger's self-signed `_@…`
-    /// certificate makes nobody trusted.
+    /// certificate makes nobody trusted, and neither does a bare key's
+    /// structural anchor for its own `<npub>.fips`: anyone has one. A
+    /// bare-key issuer enters the file when the user resolves a name under
+    /// it or verifies its bundle (the verifier pins it then), never from
+    /// an unsolicited certificate naming a key.
     pub fn is_trusted_author(&self, certs: &Certs, author: &Npub, now: u64) -> bool {
         if self.issuers.iter().any(|p| p.npub == *author)
             || self.seen.iter().any(|(k, _)| k.author == *author)
@@ -482,6 +486,14 @@ mod tests {
             !s.is_trusted_author(&certs, &key(8), NOW),
             "certified by a stranger"
         );
+        let overlay = key(7).fips_name();
+        certs
+            .insert(cert(7, &format!("alice@{overlay}"), 4, &[]), NOW)
+            .unwrap();
+        assert!(
+            !s.is_trusted_author(&certs, &key(7), NOW),
+            "a bare key's own overlay anchor makes it nobody's trusted author"
+        );
         // record() admits trusted authors only, and merges: the claim
         // entry stays, timestamps move forward only.
         let trusted: Vec<Npub> = (1..=8)
@@ -489,7 +501,7 @@ mod tests {
             .filter(|a| s.is_trusted_author(&certs, a, NOW))
             .collect();
         s.record(&certs, |a| trusted.contains(a));
-        assert_eq!(s.seen.len(), 2);
+        assert_eq!(s.seen.len(), 2, "the claim and the root's");
         assert!(
             s.seen
                 .iter()

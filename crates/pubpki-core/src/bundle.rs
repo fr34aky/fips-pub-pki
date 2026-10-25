@@ -95,9 +95,6 @@ impl Bundle {
     pub fn validate(&self, known: &Certs, anchors: &Anchors, now: u64) -> Result<Path, PathError> {
         let mut table = Certs::new();
         for c in &self.certs {
-            if let Some(at) = known.newest_seen(&c.issuer, &c.name) {
-                table.set_floor(c.issuer, c.name.clone(), at);
-            }
             if let Some(have) = known.get(&c.issuer, &c.name) {
                 let _ = table.insert(have.clone(), now);
             }
@@ -106,9 +103,18 @@ impl Bundle {
             let _ = table.insert(s.clone(), now);
         }
         for c in &self.certs {
-            // Stale or future ones are refused here and, if the path
-            // needs them, named by validate.
+            // Older than a known certificate or future: refused here and,
+            // if the path needs them, named by validate.
             let _ = table.insert(c.clone(), now);
+        }
+        // The floors (what was seen, certificate gone) go on after the
+        // bundle's certificates are in, so a stale link is still a
+        // candidate that validate names as superseded and passes over
+        // for the next one, rather than one missing without a word.
+        for c in &self.certs {
+            if let Some(at) = known.newest_seen(&c.issuer, &c.name) {
+                table.set_floor(c.issuer, c.name.clone(), at);
+            }
         }
         validate(&table, anchors, self.cert(), now)
     }
@@ -192,6 +198,10 @@ mod tests {
             relays: Vec::new(),
             created_at: NOW - 60,
         }
+    }
+
+    fn name(s: &str) -> Name {
+        Name::parse(s).unwrap()
     }
 
     fn event(c: &Certificate) -> Event {
@@ -338,6 +348,35 @@ mod tests {
             b.validate(&known, &anchors, NOW),
             Err(PathError::Superseded)
         );
+        // Only the floor remains of the newer delegation (a restart): the
+        // bundle's older copy is named as superseded, not merely missing.
+        let mut known = Certs::new();
+        known.set_floor(key(1), name("_@example.org"), NOW);
+        assert_eq!(
+            b.validate(&known, &anchors, NOW),
+            Err(PathError::Via(
+                "_@example.org".into(),
+                Box::new(PathError::Superseded)
+            ))
+        );
+        let mut known = Certs::new();
+        known.set_floor(key(2), name("alice@example.org"), NOW);
+        assert_eq!(
+            b.validate(&known, &anchors, NOW),
+            Err(PathError::Superseded)
+        );
+        // A stale delegation in the bundle does not hide a valid one from
+        // another anchored key.
+        let mut root2_ca = cert(8, "_@example.org", 2, &[Usage::Ca]);
+        root2_ca.created_at -= 100;
+        let with_alt =
+            Bundle::from_events(&[event(&alice), event(&root_ca), event(&root2_ca)]).unwrap();
+        let mut known = Certs::new();
+        known.set_floor(key(1), name("_@example.org"), NOW);
+        let mut anchors2 = anchors.clone();
+        anchors2.add("example.org", key(8));
+        let p = with_alt.validate(&known, &anchors2, NOW).unwrap();
+        assert_eq!(p.anchor.issuer, key(8));
         // A verifier that already holds the delegation validates a bundle
         // that left it out; unrelated known certificates play no part.
         let mut known = Certs::new();

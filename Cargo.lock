@@ -1390,11 +1390,14 @@ dependencies = [
 name = "pubpki"
 version = "0.1.0"
 dependencies = [
+ "nostr-sdk",
  "pubdom-resolve",
  "pubpki-core",
  "serde",
  "serde_json",
+ "serde_yaml",
  "thiserror 2.0.21",
+ "tokio",
  "tracing",
 ]
 
@@ -1414,6 +1417,7 @@ dependencies = [
  "pubdom-core",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
