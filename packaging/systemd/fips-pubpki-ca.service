@@ -1,0 +1,26 @@
+[Unit]
+Description=fips-pubpki issuer: renews certificates halfway through their validity and re-publishes them
+Documentation=https://github.com/fr34aky/fips-pub-pki
+After=network-online.target fips.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Not root: a throwaway user that can read the issuer key and write the
+# issued file. The key is /etc/fips-pubpki/ca.key, group fips-pubpki,
+# mode 0640 (docs/install.md); the state directory is created by systemd.
+DynamicUser=yes
+SupplementaryGroups=fips-pubpki
+StateDirectory=fips-pubpki
+ConfigurationDirectory=fips-pubpki
+ExecStart=/usr/bin/fips-pubpki --config /etc/fips-pubpki/config.yaml ca renew --watch
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

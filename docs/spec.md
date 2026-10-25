@@ -132,9 +132,17 @@ future are ignored. Storage is `/var/lib/fips-pubpki/issuers.json`:
 ```jsonc
 {
   "issuers": [ { "domain": "example.org", "npub": "npub1…", "method": "dnssec", "verified_at": 1790000000 } ],
-  "seen":    [ [ { "kind": 37200, "author": "npub1…", "d": "alice@example.org" }, 1790000000 ] ]
+  "seen":    [ [ { "kind": 37200, "author": "npub1…", "d": "alice@example.org" }, 1790000000 ] ],
+  "certs":   [ { "issuer": "npub1…", "name": { "local": "alice", "domain": "example.org" }, "subjects": ["npub1…"],
+                 "expiration": 1797776000, "usages": ["sign"], "revoked": null, "pathlen": null,
+                 "relays": [], "created_at": 1790000000 } ]
 }
 ```
+
+`certs` holds the trusted authors' newest certificates and markers, so
+that a name verified once resolves again with no relay in reach and a
+revocation seen once is refused after a restart; it follows the same
+retention as `seen` and is seeded after the floors.
 
 Its own file: the fips-pubdom pin file is shared with the phone and not
 touched. `method` ranks as NIP-DB's (`attested < dns-single < dns <

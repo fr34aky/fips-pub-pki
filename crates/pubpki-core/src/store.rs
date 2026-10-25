@@ -82,6 +82,11 @@ pub struct Snapshot {
     pub issuers: Vec<IssuerPin>,
     #[serde(default)]
     pub seen: Vec<(SeenKey, u64)>,
+    /// The trusted authors' newest certificates and markers, so that a
+    /// name verified once resolves again with no relay in reach, and a
+    /// revocation seen once is refused after a restart.
+    #[serde(default)]
+    pub certs: Vec<Certificate>,
 }
 
 impl Snapshot {
@@ -144,7 +149,9 @@ impl Snapshot {
         a
     }
 
-    /// Seed a certificate table with the floors remembered for kind 37200.
+    /// Seed a certificate table with the floors remembered for kind 37200
+    /// and the certificates kept. Floors first, so a kept certificate
+    /// below a floor (a file edited by hand) does not get in.
     pub fn seed(&self, certs: &mut Certs) {
         for (k, at) in &self.seen {
             if k.kind == KIND_CERT
@@ -152,6 +159,9 @@ impl Snapshot {
             {
                 certs.set_floor(k.author, name, *at);
             }
+        }
+        for c in &self.certs {
+            let _ = certs.insert(c.clone(), u64::MAX);
         }
     }
 
@@ -161,7 +171,7 @@ impl Snapshot {
     /// cannot erase the floor. Authors `keep` refuses are not added; the
     /// file admits trusted authors only ([`Snapshot::is_trusted_author`])
     /// and keeps them once admitted.
-    pub fn record(&mut self, certs: &Certs, mut keep: impl FnMut(&Npub) -> bool) {
+    pub fn record(&mut self, certs: &Certs, now: u64, mut keep: impl FnMut(&Npub) -> bool) {
         for (issuer, name, at) in certs.seen() {
             let key = SeenKey {
                 kind: KIND_CERT,
@@ -172,6 +182,26 @@ impl Snapshot {
                 Some((_, have)) => *have = (*have).max(at),
                 None if keep(&issuer) => self.seen.push((key, at)),
                 None => {}
+            }
+        }
+        // The certificates: what the table holds for kept authors, each
+        // replacing an older copy of itself; the rest of what was on file
+        // stays unless the table knows something newer. Expired ones go
+        // (their floors stay in `seen`), or the file would grow with every
+        // name ever resolved.
+        self.certs.retain(|c| now < c.expiration);
+        for c in certs
+            .iter()
+            .filter(|c| now < c.expiration && keep(&c.issuer))
+        {
+            match self
+                .certs
+                .iter_mut()
+                .find(|h| h.issuer == c.issuer && h.name == c.name)
+            {
+                Some(have) if have.created_at < c.created_at => *have = c.clone(),
+                Some(_) => {}
+                None => self.certs.push(c.clone()),
             }
         }
     }
@@ -206,6 +236,7 @@ impl Snapshot {
     /// revoked.
     pub fn retain_authors(&mut self, mut keep: impl FnMut(&Npub) -> bool) {
         self.seen.retain(|(k, _)| keep(&k.author));
+        self.certs.retain(|c| keep(&c.issuer));
     }
 
     /// Is `author` worth remembering? An issuer placed for some domain,
@@ -390,7 +421,7 @@ mod tests {
         let mut certs = Certs::new();
         let alice = cert(1, "alice@example.org", 4, &[]);
         certs.insert(alice.clone(), NOW).unwrap();
-        s.record(&certs, |_| true);
+        s.record(&certs, NOW, |_| true);
         s.note_seen(
             SeenKey {
                 kind: 37197,
@@ -413,10 +444,14 @@ mod tests {
         assert_eq!(v["seen"][0][0]["d"], "alice@example.org");
         assert_eq!(v["seen"][0][1], NOW - 60);
         assert_eq!(v["seen"][1][0]["kind"], 37197);
+        assert_eq!(v["certs"][0]["name"]["local"], "alice");
         let back: Snapshot = serde_json::from_str(&json).unwrap();
         assert_eq!(back, s);
-        // Across a restart: anchors and floors come back, nothing older
-        // than the floor gets in, the claim entry is still known.
+        // Across a restart: anchors, floors and the certificate come back,
+        // nothing older than the floor gets in, the claim entry is known.
+        let mut seeded = Certs::new();
+        back.seed(&mut seeded);
+        assert_eq!(seeded.get(&key(1), &alice.name), Some(&alice));
         let anchors = back.anchors();
         assert_eq!(
             anchors
@@ -429,7 +464,14 @@ mod tests {
         let mut older = alice.clone();
         older.created_at -= 1;
         assert_eq!(fresh.insert(older, NOW), Err(Ignored::Stale));
-        assert_eq!(fresh.insert(alice, NOW), Ok(()));
+        assert_eq!(
+            fresh.insert(alice.clone(), NOW),
+            Err(Ignored::Stale),
+            "already seeded from the file"
+        );
+        let mut newer = alice.clone();
+        newer.created_at += 1;
+        assert_eq!(fresh.insert(newer, NOW), Ok(()));
         assert_eq!(
             back.newest_seen(&SeenKey {
                 kind: 37197,
@@ -500,8 +542,15 @@ mod tests {
             .map(key)
             .filter(|a| s.is_trusted_author(&certs, a, NOW))
             .collect();
-        s.record(&certs, |a| trusted.contains(a));
+        s.record(&certs, NOW, |a| trusted.contains(a));
         assert_eq!(s.seen.len(), 2, "the claim and the root's");
+        assert_eq!(s.certs.len(), 1, "the root's delegation only");
+        // Expired certificates leave the file at the next record; their
+        // floors stay.
+        let mut later_snap = s.clone();
+        later_snap.record(&Certs::new(), NOW + 2 * 86_400, |_| true);
+        assert!(later_snap.certs.is_empty());
+        assert_eq!(later_snap.seen.len(), s.seen.len());
         assert!(
             s.seen
                 .iter()
@@ -512,7 +561,7 @@ mod tests {
         let mut renewed = cert(1, "_@example.org", 2, &[Usage::Ca]);
         renewed.created_at = NOW;
         later.insert(renewed, NOW).unwrap();
-        s.record(&later, |_| false);
+        s.record(&later, NOW, |_| false);
         let floor = |s: &Snapshot, n: u8, d: &str| {
             s.newest_seen(&SeenKey {
                 kind: KIND_CERT,
@@ -525,7 +574,7 @@ mod tests {
         older
             .insert(cert(1, "_@example.org", 2, &[Usage::Ca]), NOW)
             .unwrap();
-        s.record(&older, |_| true);
+        s.record(&older, NOW, |_| true);
         assert_eq!(floor(&s, 1, "_@example.org"), Some(NOW), "never back");
         // Once in the file, an author stays trusted even after its
         // delegation lapsed: what it revoked must stay revoked.
@@ -535,6 +584,7 @@ mod tests {
         s.retain_authors(|a| *a != key(1));
         assert!(!s.is_trusted_author(&Certs::new(), &key(1), NOW));
         assert_eq!(s.newest_seen(&k), None);
+        assert!(s.certs.is_empty());
     }
 
     #[test]

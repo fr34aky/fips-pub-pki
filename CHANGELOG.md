@@ -47,3 +47,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`/etc/fips-pubpki/config.yaml`), `FileStore`, NIP-44 `encrypt`/
   `decrypt`, `sign_detached`/`verify_detached`, the bundle as JSON with
   every signature checked.
+- `fips-pubpki`, the binary: `ca init|issue|issue-ca|renew [--watch]|
+  revoke|publish|status [--dns]`, `issuer add|remove|list`, `resolve`,
+  `names`, `verify <file>`, `bundle`, `sign`, `verify-sig`, `encrypt`,
+  `decrypt`, `nostr-json`, `config`; `packaging/systemd/fips-pubpki-ca.service`
+  for the renewal loop.
+- `pubpki::issuer`: `Issuer` (issue from a `Request`, renew and revoke
+  dated after what they replace, the claim with its chain, nostr.json),
+  `Issued` (the issued file), `sign_at` (explicit timestamp, self-tagging
+  allowed), `publish_signed`; `Verifier::bundle_for`; the `ca_*` and
+  `upstreams` configuration keys.
+- The verifier's file keeps the trusted issuers' newest certificates and
+  markers (`certs`), so a name verified once resolves offline and a
+  revocation seen once is refused after a restart; a bundle's
+  certificates are learnt before validation, so a marker arriving in a
+  failing bundle counts.
+- Documentation: `docs/how-it-works.md`, `docs/install.md`,
+  `docs/issuer.md`, `docs/users.md`.
