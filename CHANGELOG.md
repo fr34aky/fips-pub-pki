@@ -27,3 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `names_of`; revocation, expiry, rollback and `pathlen` are checked
   on every link and reported with the link's name. `prune_expired` and
   `retain_issuers` bound the tables.
+- `pubpki_core::store`: the verifier's file (spec §6) — `IssuerPin` with
+  `IssuerMethod` (`pinned` above every verification), `Snapshot` with
+  pin and unpin by strength, floors to and from the certificate table,
+  anti-rollback for the issuers' claims, and the trusted-author rule that
+  keeps strangers' events out of the file; `IssuerStore` and
+  `MemoryStore`.
+- `pubpki_core::bundle`: the offline bundle (spec §7) — `Bundle` sorts
+  certificates, `fips-ca` claims and attestations with the failing
+  event's position in the error, validates against what the verifier
+  already knows, and lists what the I/O crate must verify to anchor it.

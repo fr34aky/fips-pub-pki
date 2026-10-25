@@ -13,3 +13,6 @@ description = "Policy core of fips-pub-pki: names, certificates, sub-issuer scop
 pubdom-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

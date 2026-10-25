@@ -115,8 +115,20 @@ future are ignored. Storage is `/var/lib/fips-pubpki/issuers.json`:
 
 Its own file: the fips-pubdom pin file is shared with the phone and not
 touched. `method` ranks as NIP-DB's (`attested < dns-single < dns <
-dnssec`; a configured bare key is `pinned`); an issuer pin changes only
-through a verification at least as strong.
+dnssec`), with `pinned` above them all for what the user configured by
+hand (a bare key, a known issuer): an issuer pin is replaced only by a
+verification at least as strong (`Snapshot::pin`), and forgotten only on
+a denial at least as strong (`Snapshot::unpin`), so unsigned DNS can
+neither install nor withdraw a DNSSEC-verified issuer and no verification
+touches a hand-configured one. Domains are normalized and a single label
+is never pinned. The `seen` key's `d` is the certificate's name or the
+claim's domain; entries for kind 37200 are rebuilt from `Certs::seen()`
+at save time (`record`), entries for the issuers' claims are kept with
+`note_seen`. The file holds entries for trusted authors only: issuers
+placed for some domain and subjects of live sub-issuer certificates
+(`is_trusted_author`, `retain_authors`, `Certs::retain_issuers`), and
+expired certificates are pruned with their timestamps kept as floors, so
+relay traffic from strangers never grows it.
 
 ## 7. The offline bundle
 
@@ -124,6 +136,20 @@ A JSON array of events: the certificate, the sub-issuer certificates up
 the path, the anchored issuer's kind 37197 claim with its `fips-ca` chain,
 optional kind 37198 attestations. `fips-pubpki verify --bundle` runs §4 on
 it with no network; `fips-pubpki bundle <name>` produces it.
+
+As implemented: the I/O crate checks every event's signature, reduces
+them to `pubdom_core::Event` and calls `Bundle::from_events`, which
+requires the first event to be a certificate, accepts at most
+`MAX_BUNDLE_EVENTS` (32), refuses any other kind, and parses each event
+with the error naming its position. `anchors_needed` lists the issuers no
+certificate in the bundle certifies, with their domains; for each, the
+I/O crate verifies the bundle's `fips-ca` claim (`claims_of`: the chain
+through `pubdom_resolve::proof`, or `attestations_of` against its
+configured witnesses) and, on success, anchors the key with the method
+earned. A bare-key issuer (`<npub>.fips`) needs no claim. `validate`
+then runs §4 over the bundle's certificates added to the verifier's own
+table; what the verifier already knows wins, so a bundle cannot roll a
+certificate back below a marker or renewal it has seen.
 
 ## 8. Signing and encryption
 

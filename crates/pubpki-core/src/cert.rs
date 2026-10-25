@@ -7,7 +7,7 @@ use pubdom_core::Npub;
 use pubdom_core::claim::Event;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum CertError {
     #[error("kind {0} is not a certificate")]
     Kind(u16),
