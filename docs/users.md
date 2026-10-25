@@ -127,7 +127,10 @@ choice above this.
 
 ## The file
 
-`issuers.json` (spec §6) holds three things, all for authors you trust:
+`issuers.json` (spec §6) is written before a command prints its answer;
+if it cannot be (a plain user with the system default path), the answer
+is printed anyway with a warning, and `issuers:` should point somewhere
+writable. It holds three things, all for authors you trust:
 the issuer pins with their method, the newest timestamp seen per
 certificate and claim (so a relay cannot roll an event back), and the
 trusted issuers' newest certificates and markers (so a name verified

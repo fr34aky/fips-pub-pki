@@ -456,7 +456,9 @@ impl Verifier {
                     .identifier(&path.anchor.domain)
                     .authors(authors)
                     .limit(32);
-                out.extend(self.relays.fetch_raw(filter, RelayScope::Offline).await);
+                // Mesh only, as `fetch_attestations`: the list of whom the
+                // user trusts is not for a public relay to learn.
+                out.extend(self.relays.fetch_raw(filter, RelayScope::MeshOnly).await);
             }
         }
         if out.len() > MAX_BUNDLE_EVENTS {
@@ -474,7 +476,7 @@ impl Verifier {
             .filter(|a| self.snap.is_trusted_author(&self.certs, a, now))
             .collect();
         self.certs.retain_issuers(|a| trusted.contains(a));
-        self.snap.record(&self.certs, |a| trusted.contains(a));
+        self.snap.record(&self.certs, now, |a| trusted.contains(a));
         self.store.save(&self.snap)
     }
 

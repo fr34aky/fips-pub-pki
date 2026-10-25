@@ -154,8 +154,19 @@ sudo fips-pubpki ca renew --force      # everything live
 A renewal is the same certificate with a fresh validity of the same
 length and a later timestamp; relays keep the newest. The unit from
 [install.md](install.md) (`ca renew --watch`) does this on its own,
-checking at least hourly and sleeping until the next one is due.
-Revoked names are never renewed.
+checking at least hourly and sleeping until the next one is due; it
+re-reads `issued.json` every round, so what you issue or revoke by hand
+while it runs is picked up within the hour.
+
+A certificate that expired while the node was down is renewed too, as
+long as it has not been expired for longer than its own validity; past
+that it counts as abandoned on purpose, and only `--force` (everything
+not revoked, expired included) or a fresh `ca issue` revives it. Revoked
+names are never renewed.
+
+What no relay accepted stays recorded as unpublished (`ca status` marks
+it) and is retried by the loop every round and by `ca publish`; a relay
+outage therefore delays a renewal, never loses it.
 
 ## 7. Revocation
 

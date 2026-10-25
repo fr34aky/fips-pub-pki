@@ -171,7 +171,7 @@ impl Snapshot {
     /// cannot erase the floor. Authors `keep` refuses are not added; the
     /// file admits trusted authors only ([`Snapshot::is_trusted_author`])
     /// and keeps them once admitted.
-    pub fn record(&mut self, certs: &Certs, mut keep: impl FnMut(&Npub) -> bool) {
+    pub fn record(&mut self, certs: &Certs, now: u64, mut keep: impl FnMut(&Npub) -> bool) {
         for (issuer, name, at) in certs.seen() {
             let key = SeenKey {
                 kind: KIND_CERT,
@@ -186,8 +186,14 @@ impl Snapshot {
         }
         // The certificates: what the table holds for kept authors, each
         // replacing an older copy of itself; the rest of what was on file
-        // stays unless the table knows something newer.
-        for c in certs.iter().filter(|c| keep(&c.issuer)) {
+        // stays unless the table knows something newer. Expired ones go
+        // (their floors stay in `seen`), or the file would grow with every
+        // name ever resolved.
+        self.certs.retain(|c| now < c.expiration);
+        for c in certs
+            .iter()
+            .filter(|c| now < c.expiration && keep(&c.issuer))
+        {
             match self
                 .certs
                 .iter_mut()
@@ -415,7 +421,7 @@ mod tests {
         let mut certs = Certs::new();
         let alice = cert(1, "alice@example.org", 4, &[]);
         certs.insert(alice.clone(), NOW).unwrap();
-        s.record(&certs, |_| true);
+        s.record(&certs, NOW, |_| true);
         s.note_seen(
             SeenKey {
                 kind: 37197,
@@ -536,9 +542,15 @@ mod tests {
             .map(key)
             .filter(|a| s.is_trusted_author(&certs, a, NOW))
             .collect();
-        s.record(&certs, |a| trusted.contains(a));
+        s.record(&certs, NOW, |a| trusted.contains(a));
         assert_eq!(s.seen.len(), 2, "the claim and the root's");
         assert_eq!(s.certs.len(), 1, "the root's delegation only");
+        // Expired certificates leave the file at the next record; their
+        // floors stay.
+        let mut later_snap = s.clone();
+        later_snap.record(&Certs::new(), NOW + 2 * 86_400, |_| true);
+        assert!(later_snap.certs.is_empty());
+        assert_eq!(later_snap.seen.len(), s.seen.len());
         assert!(
             s.seen
                 .iter()
@@ -549,7 +561,7 @@ mod tests {
         let mut renewed = cert(1, "_@example.org", 2, &[Usage::Ca]);
         renewed.created_at = NOW;
         later.insert(renewed, NOW).unwrap();
-        s.record(&later, |_| false);
+        s.record(&later, NOW, |_| false);
         let floor = |s: &Snapshot, n: u8, d: &str| {
             s.newest_seen(&SeenKey {
                 kind: KIND_CERT,
@@ -562,7 +574,7 @@ mod tests {
         older
             .insert(cert(1, "_@example.org", 2, &[Usage::Ca]), NOW)
             .unwrap();
-        s.record(&older, |_| true);
+        s.record(&older, NOW, |_| true);
         assert_eq!(floor(&s, 1, "_@example.org"), Some(NOW), "never back");
         // Once in the file, an author stays trusted even after its
         // delegation lapsed: what it revoked must stay revoked.

@@ -10,7 +10,7 @@ use pubpki::pubdom_resolve::txt::TxtVerifier;
 use pubpki::pubpki_core::pubdom_core::Npub;
 use pubpki::pubpki_core::pubdom_core::policy::TxtLookup;
 use pubpki::pubpki_core::{Certificate, Name, Path as CertPath, Resolution, SERVICE_CA, Usage};
-use pubpki::{Config, Issued, Issuer, Request, Verifier, load_keys, now, publish_signed};
+use pubpki::{Config, Issued, Issuer, Request, Verifier, load_keys, now, publish_events};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -126,13 +126,13 @@ enum CaCmd {
         #[arg(long)]
         no_publish: bool,
     },
-    /// Renew what is past half its validity (or one name now)
+    /// Renew what is past half its validity (or one name now), and retry what no relay took
     Renew {
         name: Option<String>,
-        /// Keep running: renew as certificates come due
+        /// Keep running: renew as certificates come due, hourly at least
         #[arg(long)]
         watch: bool,
-        /// Renew everything live, due or not
+        /// Renew everything not revoked, expired included
         #[arg(long)]
         force: bool,
         #[arg(long)]
@@ -188,21 +188,26 @@ async fn main() -> Result<()> {
             let mut v = Verifier::open(cfg.clone())
                 .await
                 .map_err(anyhow::Error::msg)?;
-            match cmd {
+            let r = match cmd {
                 IssuerCmd::Add { domain, npub } => {
                     let key = parse_npub(&npub)?;
                     if v.pin(&domain, key, now()) {
                         println!("pinned {key} for {domain}");
+                        Ok(())
                     } else {
-                        bail!("{domain}: not pinned (already there, or not a domain)");
+                        Err(anyhow!(
+                            "{domain}: not pinned (already there, or not a domain)"
+                        ))
                     }
                 }
                 IssuerCmd::Remove { domain, npub } => {
                     let key = parse_npub(&npub)?;
-                    if !v.unpin(&domain, &key) {
-                        bail!("{domain}: {key} was not pinned");
+                    if v.unpin(&domain, &key) {
+                        println!("forgot {key} for {domain}");
+                        Ok(())
+                    } else {
+                        Err(anyhow!("{domain}: {key} was not pinned"))
                     }
-                    println!("forgot {key} for {domain}");
                 }
                 IssuerCmd::List => {
                     if cli.json {
@@ -215,10 +220,13 @@ async fn main() -> Result<()> {
                             );
                         }
                     }
+                    Ok(())
                 }
-            }
+            };
+            // A pin that could not be written is an error, not a warning.
             v.save(now()).map_err(anyhow::Error::msg)?;
             v.shutdown().await;
+            r?;
         }
         Cmd::Resolve { name } => {
             let name = parse_name(&name)?;
@@ -226,9 +234,11 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(anyhow::Error::msg)?;
             let r = v.resolve(&name, now()).await;
-            v.save(now()).map_err(anyhow::Error::msg)?;
-            v.shutdown().await;
+            finish(v).await;
             print_resolution(&name, &r, cli.json)?;
+            if !matches!(r, Resolution::Verified(_)) {
+                std::process::exit(1);
+            }
         }
         Cmd::Names { npub } => {
             let key = parse_npub(&npub)?;
@@ -236,8 +246,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(anyhow::Error::msg)?;
             let paths = v.names_of(&key, now()).await;
-            v.save(now()).map_err(anyhow::Error::msg)?;
-            v.shutdown().await;
+            finish(v).await;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&paths)?);
             } else if paths.is_empty() {
@@ -256,8 +265,9 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(anyhow::Error::msg)?;
             let r = v.verify_bundle(&events, now());
-            v.save(now()).map_err(anyhow::Error::msg)?;
-            v.shutdown().await;
+            // What was learnt (a marker above all) is saved whether or not
+            // the path held, and before anything is printed.
+            finish(v).await;
             let path = r.map_err(|e| anyhow!("{}: not verified: {e}", file.display()))?;
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&path)?);
@@ -272,8 +282,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(anyhow::Error::msg)?;
             let r = v.bundle_for(&name, now()).await;
-            v.save(now()).map_err(anyhow::Error::msg)?;
-            v.shutdown().await;
+            finish(v).await;
             let events = r.map_err(anyhow::Error::msg)?;
             let json = pubpki::bundle::render(&events).map_err(anyhow::Error::msg)?;
             write_out(out.as_deref(), json.as_bytes())?;
@@ -311,8 +320,7 @@ async fn main() -> Result<()> {
                 .into_iter()
                 .filter(|p| p.cert().allows(Usage::Sign))
                 .collect();
-            v.save(now()).map_err(anyhow::Error::msg)?;
-            v.shutdown().await;
+            finish(v).await;
             if cli.json {
                 println!(
                     "{}",
@@ -336,8 +344,7 @@ async fn main() -> Result<()> {
                 .await
                 .map_err(anyhow::Error::msg)?;
             let r = v.resolve(&name, now()).await;
-            v.save(now()).map_err(anyhow::Error::msg)?;
-            v.shutdown().await;
+            finish(v).await;
             let path = match r {
                 Resolution::Verified(p) => p,
                 other => {
@@ -375,6 +382,17 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Save what a user command learnt and close the relays, before the
+/// answer is printed (a closed pipe must not cost what was learnt). A
+/// file that cannot be written (a plain user with the system default
+/// path) is a warning, not a lost answer.
+async fn finish(mut v: Verifier) {
+    if let Err(e) = v.save(now()) {
+        eprintln!("warning: not saved: {e} (set `issuers:` to a writable path)");
+    }
+    v.shutdown().await;
 }
 
 async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
@@ -425,6 +443,9 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
             req.usages = usages;
             req.validity_secs = days.map(|d| d.max(1) * 86_400).unwrap_or(cfg.ca_validity());
             req.relays = relays;
+            // Dated after whatever the name had before (a marker, an expired
+            // certificate), or relays and verifiers would keep the old one.
+            let mut at = now();
             if let Some(prev) = issued.get(&req.name) {
                 let prev =
                     Certificate::parse(&pubpki::core_event(prev)).map_err(anyhow::Error::msg)?;
@@ -436,8 +457,9 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
                         req.name
                     );
                 }
+                at = Issuer::after(&prev, at);
             }
-            let ev = issuer.issue(&req, now()).map_err(anyhow::Error::msg)?;
+            let ev = issuer.issue(&req, at).map_err(anyhow::Error::msg)?;
             record_and_publish(cfg, &mut issued, &[ev], no_publish, json).await?;
         }
         CaCmd::IssueCa {
@@ -453,7 +475,13 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
             req.usages = vec![Usage::Ca];
             req.pathlen = pathlen;
             req.validity_secs = days.map(|d| d.max(1) * 86_400).unwrap_or(cfg.ca_validity());
-            let ev = issuer.issue(&req, now()).map_err(anyhow::Error::msg)?;
+            let mut at = now();
+            if let Some(prev) = issued.get(&req.name) {
+                let prev =
+                    Certificate::parse(&pubpki::core_event(prev)).map_err(anyhow::Error::msg)?;
+                at = Issuer::after(&prev, at);
+            }
+            let ev = issuer.issue(&req, at).map_err(anyhow::Error::msg)?;
             record_and_publish(cfg, &mut issued, &[ev], no_publish, json).await?;
         }
         CaCmd::Renew {
@@ -462,9 +490,12 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
             force,
             no_publish,
         } => {
-            let (issuer, mut issued) = open_issuer(cfg)?;
+            let (issuer, _) = open_issuer(cfg)?;
             let only = name.map(|n| parse_name(&n)).transpose()?;
             loop {
+                // Reloaded every round: the operator's commands write the
+                // same file while the loop runs.
+                let mut issued = Issued::load(&cfg.ca_issued).map_err(anyhow::Error::msg)?;
                 let t = now();
                 let due: Vec<Certificate> = issued
                     .certificates()
@@ -473,7 +504,7 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
                     .filter(|c| c.revoked.is_none() && c.issuer == issuer.npub())
                     .filter(|c| match &only {
                         Some(n) => &c.name == n,
-                        None => force || is_due(c, t),
+                        None => force || renewable(c, t),
                     })
                     .collect();
                 if let Some(n) = &only
@@ -485,27 +516,37 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
                 for c in &due {
                     events.push(issuer.renew(c, t).map_err(anyhow::Error::msg)?);
                 }
-                if !events.is_empty() {
-                    record_and_publish(cfg, &mut issued, &events, no_publish, json).await?;
-                } else if !watch {
-                    eprintln!("nothing due");
-                }
+                let r = if !events.is_empty() {
+                    record_and_publish(cfg, &mut issued, &events, no_publish, json).await
+                } else if !no_publish && !issued.pending(t).is_empty() {
+                    publish_pending(cfg, &mut issued).await
+                } else {
+                    if !watch {
+                        eprintln!("nothing due");
+                    }
+                    Ok(())
+                };
                 if !watch || only.is_some() {
-                    break;
+                    return r;
+                }
+                if let Err(e) = r {
+                    // Not fatal in the loop: what reached no relay stays
+                    // pending and is retried next round.
+                    tracing::warn!(error = %e, "renewal round incomplete");
                 }
                 let next = issued
                     .certificates()
                     .into_iter()
                     .map(|(c, _)| c)
                     .filter(|c| c.revoked.is_none() && now() < c.expiration)
-                    .map(halfway)
+                    .map(|c| halfway(&c))
                     .min()
-                    .unwrap_or(now() + 6 * 3600);
-                let wait = next.saturating_sub(now()).clamp(60, 6 * 3600);
+                    .unwrap_or(now() + 3600);
+                let wait = next.saturating_sub(now()).clamp(60, 3600);
                 tracing::info!(seconds = wait, "next renewal check");
                 tokio::select! {
                     _ = tokio::time::sleep(Duration::from_secs(wait)) => {}
-                    _ = tokio::signal::ctrl_c() => break,
+                    _ = tokio::signal::ctrl_c() => return Ok(()),
                 }
             }
         }
@@ -533,7 +574,7 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
             certs_only,
             require_chain,
         } => {
-            let (issuer, issued) = open_issuer(cfg)?;
+            let (issuer, mut issued) = open_issuer(cfg)?;
             let mut events = Vec::new();
             if !certs_only && !issuer.is_overlay() {
                 let upstreams = if cfg.upstreams.is_empty() {
@@ -593,7 +634,13 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
             if events.is_empty() {
                 bail!("nothing to publish");
             }
-            publish_all(cfg, &events).await?;
+            let failed = publish(cfg, &events, &mut issued).await?;
+            issued.save(&cfg.ca_issued).map_err(anyhow::Error::msg)?;
+            if failed > 0 {
+                bail!(
+                    "{failed} event(s) reached no relay; `ca publish` or the renewal loop retries"
+                );
+            }
         }
         CaCmd::Status { dns } => {
             let (issuer, issued) = open_issuer(cfg)?;
@@ -633,8 +680,17 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
             }
             let t = now();
             let certs = issued.certificates();
-            println!("\n{} event(s) issued:", certs.len());
-            for (c, _) in certs {
+            let pending = issued.pending(t).len();
+            println!(
+                "\n{} event(s) issued{}:",
+                certs.len(),
+                if pending > 0 {
+                    format!(", {pending} not yet on any relay")
+                } else {
+                    String::new()
+                }
+            );
+            for (c, ev) in certs {
                 let state = if c.revoked.is_some() {
                     "revoked"
                 } else if t >= c.expiration {
@@ -646,12 +702,17 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
                 };
                 let usages: Vec<String> = c.usages.iter().map(|u| u.to_string()).collect();
                 println!(
-                    "  {:<40} {:<16} expires {:>8}  {} key(s) {}",
+                    "  {:<40} {:<16} expires {:>8}  {} key(s) {}{}",
                     c.name.to_string(),
                     state,
                     in_days(c.expiration, t),
                     c.subjects.len(),
-                    usages.join(",")
+                    usages.join(","),
+                    if issued.unpublished.contains(&ev.id.to_hex()) {
+                        "  (unpublished)"
+                    } else {
+                        ""
+                    }
                 );
             }
         }
@@ -659,12 +720,21 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn halfway(c: Certificate) -> u64 {
+fn halfway(c: &Certificate) -> u64 {
     c.created_at + (c.expiration.saturating_sub(c.created_at)) / 2
 }
 
+/// Past half its validity and not yet expired.
 fn is_due(c: &Certificate, now: u64) -> bool {
-    now < c.expiration && now >= halfway(c.clone())
+    now < c.expiration && now >= halfway(c)
+}
+
+/// What the loop and a plain `renew` take on: due, or expired for less
+/// than its own validity (the node was down over the expiry). Expired
+/// for longer is abandoned on purpose; `--force` or `issue` revives it.
+fn renewable(c: &Certificate, now: u64) -> bool {
+    let length = c.expiration.saturating_sub(c.created_at);
+    is_due(c, now) || (now >= c.expiration && now < c.expiration + length)
 }
 
 fn in_days(at: u64, now: u64) -> String {
@@ -687,6 +757,8 @@ fn open_issuer(cfg: &Config) -> Result<(Issuer, Issued)> {
     Ok((issuer, issued))
 }
 
+/// Record the events (refusing one the file would not take), save, print,
+/// publish what is pending.
 async fn record_and_publish(
     cfg: &Config,
     issued: &mut Issued,
@@ -695,7 +767,12 @@ async fn record_and_publish(
     json: bool,
 ) -> Result<()> {
     for ev in events {
-        issued.put(ev.clone());
+        if !issued.put(ev.clone()) {
+            bail!(
+                "{}: not newer than what is on file; nothing recorded",
+                Issued::d_of(ev).unwrap_or_default()
+            );
+        }
     }
     issued.save(&cfg.ca_issued).map_err(anyhow::Error::msg)?;
     for ev in events {
@@ -717,22 +794,48 @@ async fn record_and_publish(
         }
     }
     if no_publish {
-        eprintln!("not published (--no-publish); `fips-pubpki ca publish --certs-only` later");
+        eprintln!(
+            "not published (--no-publish); `fips-pubpki ca publish --certs-only` or the renewal loop will"
+        );
         return Ok(());
     }
-    publish_all(cfg, events).await
+    publish_pending(cfg, issued).await
 }
 
-async fn publish_all(cfg: &Config, events: &[Event]) -> Result<()> {
+/// Publish every pending event, mark what a relay accepted, save.
+async fn publish_pending(cfg: &Config, issued: &mut Issued) -> Result<()> {
+    let pending = issued.pending(now());
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let failed = publish(cfg, &pending, issued).await?;
+    issued.save(&cfg.ca_issued).map_err(anyhow::Error::msg)?;
+    if failed > 0 {
+        bail!("{failed} event(s) reached no relay; `ca publish` or the renewal loop retries");
+    }
+    Ok(())
+}
+
+/// One connection round for all `events`; what a relay accepted is marked
+/// published in `issued` (the caller saves). Returns how many reached no
+/// relay.
+async fn publish(cfg: &Config, events: &[Event], issued: &mut Issued) -> Result<usize> {
     let relays = cfg.ca_relays();
+    let results = publish_events(events, &relays, cfg.budget())
+        .await
+        .map_err(anyhow::Error::msg)?;
     let mut failed = 0;
-    for ev in events {
-        match publish_signed(ev, &relays, cfg.budget()).await {
-            Ok(o) => {
+    for (ev, r) in events.iter().zip(results) {
+        let label = format!(
+            "kind {} {}",
+            ev.kind.as_u16(),
+            Issued::d_of(ev).unwrap_or_default()
+        );
+        match r {
+            Ok(o) if !o.none_accepted() => {
+                issued.mark_published(&ev.id.to_hex());
                 eprintln!(
-                    "kind {} {}: accepted by {}{}",
-                    ev.kind.as_u16(),
-                    d_of(ev),
+                    "{label}: accepted by {}{}",
                     o.accepted.len(),
                     if o.rejected.is_empty() {
                         String::new()
@@ -747,29 +850,25 @@ async fn publish_all(cfg: &Config, events: &[Event]) -> Result<()> {
                         )
                     }
                 );
-                if o.none_accepted() {
-                    failed += 1;
-                }
+            }
+            Ok(o) => {
+                failed += 1;
+                eprintln!(
+                    "{label}: no relay accepted it ({})",
+                    o.rejected
+                        .iter()
+                        .map(|(u, why)| format!("{u}: {why}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                );
             }
             Err(e) => {
-                eprintln!("kind {} {}: {e}", ev.kind.as_u16(), d_of(ev));
                 failed += 1;
+                eprintln!("{label}: {e}");
             }
         }
     }
-    if failed > 0 {
-        bail!("{failed} event(s) reached no relay; `fips-pubpki ca publish` retries");
-    }
-    Ok(())
-}
-
-fn d_of(ev: &Event) -> String {
-    ev.tags
-        .iter()
-        .map(|t| t.clone().to_vec())
-        .find(|t| t.len() >= 2 && t[0] == "d")
-        .map(|t| t[1].clone())
-        .unwrap_or_default()
+    Ok(failed)
 }
 
 fn user_keys(cfg: &Config) -> Result<Keys> {
@@ -780,17 +879,24 @@ fn user_keys(cfg: &Config) -> Result<Keys> {
     load_keys(&path.display().to_string()).map_err(anyhow::Error::msg)
 }
 
+/// The key file is created with its final mode: never readable by others,
+/// not even for an instant.
 fn write_secret(path: &std::path::Path, keys: &Keys) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| dir.display().to_string())?;
     }
-    let hex = keys.secret_key().to_secret_hex();
-    std::fs::write(path, format!("{hex}\n")).with_context(|| path.display().to_string())?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
     }
+    let mut f = opts
+        .open(path)
+        .with_context(|| path.display().to_string())?;
+    writeln!(f, "{}", keys.secret_key().to_secret_hex())?;
+    f.sync_all()?;
     Ok(())
 }
 

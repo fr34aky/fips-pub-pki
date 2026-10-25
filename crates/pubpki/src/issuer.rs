@@ -7,7 +7,7 @@ use crate::crypto::npub_of;
 use crate::store::write_atomic;
 use nostr_sdk::{Client, Event, EventBuilder, Keys, Kind, Tag, Timestamp};
 use pubdom_resolve::relay::Outcome;
-use pubpki_core::pubdom_core::claim::{Event as CoreEvent, ServiceClaim};
+use pubpki_core::pubdom_core::claim::ServiceClaim;
 use pubpki_core::pubdom_core::domain::normalize;
 use pubpki_core::pubdom_core::txt::TxtRecord;
 use pubpki_core::pubdom_core::{KIND_CLAIM, Npub};
@@ -16,13 +16,19 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::time::Duration;
 
-/// `/var/lib/fips-pubpki/issued.json`: every event this issuer published,
-/// newest per name, markers included. What `ca renew --watch` works from
-/// and `ca status` lists.
+/// `/var/lib/fips-pubpki/issued.json`: every event this issuer signed,
+/// newest per name, markers included, and which of them no relay has
+/// accepted yet. What `ca renew --watch` works from and `ca status`
+/// lists. Reloaded by every command and every loop iteration, since the
+/// unit and the operator's commands share it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issued {
     #[serde(default)]
     pub events: Vec<Event>,
+    /// Ids (hex) of events in `events` that still reached no relay; the
+    /// renewal loop and `ca publish` retry them.
+    #[serde(default)]
+    pub unpublished: Vec<String>,
 }
 
 impl Issued {
@@ -41,7 +47,8 @@ impl Issued {
         write_atomic(path, &bytes).map_err(|e| format!("{}: {e}", path.display()))
     }
 
-    fn d_of(ev: &Event) -> Option<String> {
+    /// The `d` tag of an event.
+    pub fn d_of(ev: &Event) -> Option<String> {
         ev.tags
             .iter()
             .map(|t| t.clone().to_vec())
@@ -49,25 +56,46 @@ impl Issued {
             .map(|t| t[1].clone())
     }
 
-    /// Record `ev`; a newer event for the same name replaces the older.
-    /// Returns whether it was taken.
+    /// Record `ev` as not yet published; a newer event for the same name
+    /// replaces the older (and the older's publication is moot). Returns
+    /// whether it was taken.
     pub fn put(&mut self, ev: Event) -> bool {
         let d = Self::d_of(&ev);
+        let id = ev.id.to_hex();
         match self
             .events
             .iter_mut()
             .find(|e| e.kind == ev.kind && Self::d_of(e) == d)
         {
-            Some(have) if have.created_at >= ev.created_at => false,
+            Some(have) if have.created_at >= ev.created_at => return false,
             Some(have) => {
+                let old = have.id.to_hex();
+                self.unpublished.retain(|u| *u != old);
                 *have = ev;
-                true
             }
-            None => {
-                self.events.push(ev);
-                true
-            }
+            None => self.events.push(ev),
         }
+        self.unpublished.push(id);
+        true
+    }
+
+    /// The events still to publish, unexpired ones only.
+    pub fn pending(&self, now: u64) -> Vec<Event> {
+        self.events
+            .iter()
+            .filter(|e| self.unpublished.contains(&e.id.to_hex()))
+            .filter(|e| {
+                Certificate::parse(&crate::core_event(e))
+                    .map(|c| now < c.expiration)
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// A relay accepted `id`.
+    pub fn mark_published(&mut self, id: &str) {
+        self.unpublished.retain(|u| u != id);
     }
 
     /// The newest certificate event for `name`.
@@ -224,8 +252,9 @@ impl Issuer {
     }
 
     /// A timestamp after `prev`'s: `now`, or one second later than `prev`
-    /// when the clock has not moved (or went back).
-    fn after(prev: &Certificate, now: u64) -> u64 {
+    /// when the clock has not moved (or went back). Anything replacing an
+    /// event for a name is dated this way, a re-issue after a marker too.
+    pub fn after(prev: &Certificate, now: u64) -> u64 {
         now.max(prev.created_at + 1)
     }
 
@@ -308,16 +337,21 @@ impl Issuer {
     }
 }
 
-/// Publish an already signed event to `relays`, as it is: a renewal or
+/// Publish already signed events to `relays`, as they are: a renewal or
 /// a marker must reach the relays with the `created_at` the issuer
-/// recorded. Connections awaited up to `timeout`; the outcome per relay.
-pub async fn publish_signed(
-    event: &Event,
+/// recorded. One connection round for all of them; connections awaited
+/// up to `timeout`, then each event sent with that deadline. One result
+/// per event, in order.
+pub async fn publish_events(
+    events: &[Event],
     relays: &[String],
     timeout: Duration,
-) -> Result<Outcome, String> {
+) -> Result<Vec<Result<Outcome, String>>, String> {
     if relays.is_empty() {
         return Err("no relays configured (ca_relays, mesh_relays or public_relays)".into());
+    }
+    if events.is_empty() {
+        return Ok(Vec::new());
     }
     let client = Client::default();
     for u in relays {
@@ -336,29 +370,28 @@ pub async fn publish_signed(
     };
     client.connect().await;
     client.wait_for_connection(timeout).await;
-    let out = tokio::time::timeout(timeout, client.send_event(event))
-        .await
-        .map_err(|_| "timed out publishing".to_string())?
-        .map_err(|e| e.to_string())?;
-    let outcome = Outcome {
-        accepted: out
-            .success
-            .iter()
-            .map(|u| configured(&u.to_string()))
-            .collect(),
-        rejected: out
-            .failed
-            .iter()
-            .map(|(u, why)| (configured(&u.to_string()), why.to_string()))
-            .collect(),
-    };
+    let mut results = Vec::with_capacity(events.len());
+    for event in events {
+        let r = match tokio::time::timeout(timeout, client.send_event(event)).await {
+            Err(_) => Err("timed out publishing".to_string()),
+            Ok(Err(e)) => Err(e.to_string()),
+            Ok(Ok(out)) => Ok(Outcome {
+                accepted: out
+                    .success
+                    .iter()
+                    .map(|u| configured(&u.to_string()))
+                    .collect(),
+                rejected: out
+                    .failed
+                    .iter()
+                    .map(|(u, why)| (configured(&u.to_string()), why.to_string()))
+                    .collect(),
+            }),
+        };
+        results.push(r);
+    }
     client.disconnect().await;
-    Ok(outcome)
-}
-
-/// The core view of a stored event, for callers holding `Issued`.
-pub fn core_of(ev: &Event) -> CoreEvent {
-    crate::core_event(ev)
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -490,12 +523,30 @@ mod tests {
         rc.validity_secs = 3600;
         let ca = issuer.issue(&rc, now() - 10).unwrap();
         let mut issued = Issued::default();
-        assert!(issued.put(a.clone()) && issued.put(b) && issued.put(ca));
+        assert!(issued.put(a.clone()) && issued.put(b.clone()) && issued.put(ca));
         assert!(!issued.put(a.clone()), "the same again");
+        assert_eq!(issued.unpublished.len(), 3);
+        assert_eq!(issued.pending(now()).len(), 3);
+        issued.mark_published(&b.id.to_hex());
+        assert_eq!(issued.pending(now()).len(), 2);
         let c = Certificate::parse(&crate::core_event(&a)).unwrap();
         let renewed = issuer.renew(&c, now()).unwrap();
         assert!(issued.put(renewed.clone()));
         assert_eq!(issued.events.len(), 3);
+        assert!(
+            !issued.unpublished.contains(&a.id.to_hex()),
+            "the replaced event's publication is moot"
+        );
+        assert!(issued.unpublished.contains(&renewed.id.to_hex()));
+        assert_eq!(
+            issued.pending(now()).len(),
+            2,
+            "the renewal and the delegation"
+        );
+        assert!(
+            issued.pending(now() + 4000).is_empty(),
+            "expired ones are not pending"
+        );
         assert_eq!(
             issued.get(&Name::parse("alice@example.org").unwrap()),
             Some(&renewed)
