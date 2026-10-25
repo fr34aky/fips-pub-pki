@@ -14,7 +14,7 @@ pub mod path;
 
 pub use cert::{CertError, Certificate, Usage};
 pub use name::Name;
-pub use path::{Anchor, AnchorKind, Anchors, Certs, Path, PathError, Resolution};
+pub use path::{Anchor, AnchorKind, Anchors, Certs, Ignored, Path, PathError, Resolution};
 /// The crate this one builds on, re-exported so consumers use one version.
 pub use pubdom_core;
 

@@ -25,4 +25,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Certs` (the newest certificate per issuer and name, the anti-rollback
   floor), `validate`, `resolve` (verified, disputed, refused, unknown)
   and `names_of`; revocation, expiry, rollback and `pathlen` are checked
-  on every link and reported with the link's name.
+  on every link and reported with the link's name. `prune_expired` and
+  `retain_issuers` bound the tables.

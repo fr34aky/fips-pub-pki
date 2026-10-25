@@ -6,7 +6,7 @@ last run. Nothing above level 0 has run yet.
 
 | level | what | needs | last run |
 |---|---|---|---|
-| 0 | `cargo test --workspace`: names, certificates, scope rule, path validation tables | nothing | 2026-10-25, green (19 tests) |
+| 0 | `cargo test --workspace`: names, certificates, scope rule, path validation tables | nothing | 2026-10-25, green (23 tests) |
 | 1 | offline bundle: `fips-pubpki verify --bundle` on a bundle made by `fips-pubpki bundle`, machine with no network | the CLI | — |
 | 2 | issuer on the demo domain: `_fips-ca` record, claim with chain, `ca issue` for a name, `resolve` from a second node online | the user's word for the DNS record | — |
 | 3 | mesh only: the second node with no Internet resolves the name from the mesh relay and the chain in the claim | the mesh relay | — |

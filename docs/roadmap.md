@@ -15,7 +15,7 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
 - 2026-10-25: `pubpki_core::path` — path validation over tables
   (`Anchors`, `Certs`): anchored and certified issuers, nearest `_@E`,
   `pathlen`, `MAX_PATH`, revocation and rollback along the path,
-  disputes; nine table tests from spec §4 and nip.md.
+  disputes; thirteen table tests from spec §4 and nip.md.
 
 ## Next, in order
 

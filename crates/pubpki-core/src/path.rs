@@ -17,6 +17,7 @@ use crate::cert::Certificate;
 use crate::name::{Name, is_under, overlay_key};
 use crate::{MAX_FUTURE_SECS, MAX_PATH};
 use pubdom_core::Npub;
+use pubdom_core::domain::normalize;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -41,8 +42,9 @@ pub enum AnchorKind {
     Overlay,
 }
 
-/// The verifier's anchored issuers, by domain. Domains are normalized as
-/// `Name::domain` is.
+/// The verifier's anchored issuers, by domain. Domains are normalized on
+/// the way in; a single label (`org`, `fips`) is never a domain one can
+/// be anchored for.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Anchors {
     pins: Vec<(String, Npub)>,
@@ -53,20 +55,27 @@ impl Anchors {
         Self::default()
     }
 
-    /// Anchor `issuer` for `domain`. Returns `false` if it already was.
+    /// Anchor `issuer` for `domain`. Returns `false` if it already was,
+    /// or if `domain` is not a domain one can be anchored for.
     pub fn add(&mut self, domain: &str, issuer: Npub) -> bool {
-        if self.pins.iter().any(|(d, k)| d == domain && *k == issuer) {
+        let Some(domain) = pin_domain(domain) else {
+            return false;
+        };
+        if self.pins.iter().any(|(d, k)| *d == domain && *k == issuer) {
             return false;
         }
-        self.pins.push((domain.to_string(), issuer));
+        self.pins.push((domain, issuer));
         true
     }
 
     /// Withdraw `issuer` for `domain` (the TXT record dropped it, or the
     /// user did). Returns whether it was there.
     pub fn remove(&mut self, domain: &str, issuer: &Npub) -> bool {
+        let Some(domain) = pin_domain(domain) else {
+            return false;
+        };
         let before = self.pins.len();
-        self.pins.retain(|(d, k)| !(d == domain && k == issuer));
+        self.pins.retain(|(d, k)| !(*d == domain && k == issuer));
         self.pins.len() != before
     }
 
@@ -83,7 +92,9 @@ impl Anchors {
     }
 
     /// Is `issuer` anchored for `domain` or a domain above it? The
-    /// nearest domain wins, pins before the overlay rule.
+    /// nearest domain wins, pins before the overlay rule. The walk stops
+    /// at an overlay domain `<npub>.fips`: nothing above it (the label
+    /// `fips`) anchors names under it.
     pub fn anchor_for(&self, issuer: &Npub, domain: &str) -> Option<Anchor> {
         let mut scope = domain;
         loop {
@@ -94,16 +105,29 @@ impl Anchors {
                     kind: AnchorKind::Pinned,
                 });
             }
-            if overlay_key(scope).as_ref() == Some(issuer) {
-                return Some(Anchor {
+            if let Some(key) = overlay_key(scope) {
+                return (key == *issuer).then(|| Anchor {
                     issuer: *issuer,
                     domain: scope.to_string(),
                     kind: AnchorKind::Overlay,
                 });
             }
             scope = scope.split_once('.')?.1;
+            if !scope.contains('.') {
+                return None;
+            }
         }
     }
+}
+
+/// A domain one can pin an issuer for: normalized, at least two labels.
+fn pin_domain(domain: &str) -> Option<String> {
+    normalize(domain).filter(|d| d.contains('.'))
+}
+
+/// Dated more than `MAX_FUTURE_SECS` ahead of `now` (NIP-DB's rule).
+fn too_far_ahead(cert: &Certificate, now: u64) -> bool {
+    cert.created_at > now.saturating_add(MAX_FUTURE_SECS)
 }
 
 /// Why a certificate was not taken into [`Certs`].
@@ -139,7 +163,7 @@ impl Certs {
 
     /// Take a certificate in; the newest per (issuer, name) wins.
     pub fn insert(&mut self, cert: Certificate, now: u64) -> Result<(), Ignored> {
-        if cert.created_at > now.saturating_add(MAX_FUTURE_SECS) {
+        if too_far_ahead(&cert, now) {
             return Err(Ignored::Future);
         }
         let key = (cert.issuer, cert.name.clone());
@@ -155,6 +179,32 @@ impl Certs {
         }
         self.newest.insert(key, cert);
         Ok(())
+    }
+
+    /// Drop every certificate whose `expiration` has passed, markers
+    /// included (a marker expires with what it revoked); their floors
+    /// stay, so nothing older can return. Relays drop them too (NIP-40).
+    pub fn prune_expired(&mut self, now: u64) -> usize {
+        let before = self.newest.len();
+        let floor = &mut self.floor;
+        self.newest.retain(|key, c| {
+            if now < c.expiration {
+                return true;
+            }
+            let e = floor.entry(key.clone()).or_insert(0);
+            *e = (*e).max(c.created_at);
+            false
+        });
+        before - self.newest.len()
+    }
+
+    /// Keep the certificates and floors `keep` accepts, by issuer. The
+    /// store uses this to bound what untrusted relay traffic can grow:
+    /// anything from an issuer that is neither anchored nor certified
+    /// need not be remembered.
+    pub fn retain_issuers(&mut self, mut keep: impl FnMut(&Npub) -> bool) {
+        self.newest.retain(|(issuer, _), _| keep(issuer));
+        self.floor.retain(|(issuer, _), _| keep(issuer));
     }
 
     /// The newest certificate `issuer` published for `name`, marker or not.
@@ -242,8 +292,10 @@ pub enum PathError {
 }
 
 /// A validated path: the certificate first, then the sub-issuer
-/// certificates up to the one the anchor signed.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// certificates up to the one the anchor signed. Serialized for display;
+/// never read back (a path is recomputed from events, not trusted from
+/// a file), which keeps `certs` non-empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Path {
     pub certs: Vec<Certificate>,
     pub anchor: Anchor,
@@ -279,7 +331,7 @@ pub fn validate(
 }
 
 fn check_link(certs: &Certs, cert: &Certificate, now: u64) -> Result<(), PathError> {
-    if cert.created_at > now.saturating_add(MAX_FUTURE_SECS) {
+    if too_far_ahead(cert, now) {
         return Err(PathError::Future);
     }
     if let Some(reason) = &cert.revoked {
@@ -324,15 +376,18 @@ fn build(
         return Err(PathError::TooLong);
     }
     // Candidates: live sub-issuer certificates naming our issuer, for a
-    // domain at or above ours; nearest first, then newest.
+    // domain at or above ours, from another key (a key delegating to
+    // itself adds a link and answers nothing: the anchor question for it
+    // was just asked). Nearest first, then newest, then by issuer and
+    // name so that equal inputs give equal paths on every verifier.
     let mut candidates: Vec<&Certificate> = certs
         .iter()
         .filter(|s| {
             s.is_ca()
+                && s.issuer != cert.issuer
                 && s.subjects.contains(&cert.issuer)
                 && is_under(&cert.name.domain, &s.name.domain)
-                && !(s.issuer == cert.issuer && s.name == cert.name)
-                && !trail.contains(&(s.issuer, s.name.clone()))
+                && !trail.iter().any(|(i, n)| *i == s.issuer && *n == s.name)
         })
         .collect();
     if candidates.is_empty() {
@@ -344,6 +399,8 @@ fn build(
             .len()
             .cmp(&a.name.domain.len())
             .then(b.created_at.cmp(&a.created_at))
+            .then(a.issuer.cmp(&b.issuer))
+            .then(a.name.to_string().cmp(&b.name.to_string()))
     });
     let below = ca_below + u32::from(cert.is_ca());
     let mut first_err = None;
@@ -413,6 +470,7 @@ pub fn resolve(certs: &Certs, anchors: &Anchors, name: &Name, now: u64) -> Resol
         a.len()
             .cmp(&b.len())
             .then(b.cert().created_at.cmp(&a.cert().created_at))
+            .then(a.cert().issuer.cmp(&b.cert().issuer))
     });
     Resolution::Verified(valid.swap_remove(0))
 }
@@ -593,18 +651,23 @@ mod tests {
             validate(&certs, &anchors, &bob, NOW),
             Err(PathError::NoIssuer)
         );
-        // A self-signed sub-issuer certificate certifies nobody; the
-        // answer names it, since the holder does present a delegation.
+        // A self-signed sub-issuer certificate certifies nobody and is
+        // not even a candidate.
         let selfie = ca(EVIL, "example.org", EVIL);
         let forged = cert(EVIL, "alice@example.org", EVIL);
         let (certs, anchors) = world(&[selfie, forged.clone()]);
         assert_eq!(
             validate(&certs, &anchors, &forged, NOW),
-            Err(PathError::Via(
-                "_@example.org".into(),
-                Box::new(PathError::NoIssuer)
-            ))
+            Err(PathError::NoIssuer)
         );
+        // Nor does a legitimate key's delegation to itself lengthen a
+        // path or shadow the real one.
+        let root_ca = ca(ROOT, "example.org", ONLINE);
+        let mut own = ca(ONLINE, "example.org", ONLINE);
+        own.created_at = NOW;
+        let alice = cert(ONLINE, "alice@example.org", ALICE);
+        let (certs, anchors) = world(&[root_ca, own, alice.clone()]);
+        assert_eq!(validate(&certs, &anchors, &alice, NOW).unwrap().len(), 2);
         // Two keys certifying each other go nowhere either.
         let a = ca(EVIL, "example.org", 9);
         let b = ca(9, "example.org", EVIL);
@@ -870,6 +933,118 @@ mod tests {
         assert!(pinned.remove(&domain, &issuer));
         assert!(!pinned.remove(&domain, &issuer));
         assert!(pinned.is_empty());
+    }
+
+    #[test]
+    fn anchors_normalize_refuse_single_labels_and_stop_at_the_overlay() {
+        let mut anchors = Anchors::new();
+        assert!(anchors.add("Example.ORG.", key(ROOT)));
+        assert!(!anchors.add("example.org", key(ROOT)), "the same pin");
+        assert_eq!(anchors.for_domain("example.org").count(), 1);
+        assert!(anchors.remove("EXAMPLE.org", &key(ROOT)));
+        assert!(anchors.is_empty());
+        for bad in ["org", "fips", "", "not a domain", "-x.org"] {
+            assert!(!anchors.add(bad, key(EVIL)), "{bad:?}");
+        }
+        assert!(anchors.is_empty());
+        // A pin above an overlay domain anchors nothing under it; a pin
+        // on a public domain still covers its subdomains.
+        let overlay = key(ROOT).fips_name();
+        let under = format!("alice@{overlay}");
+        assert!(!anchors.add("fips", key(EVIL)));
+        assert!(anchors.add("sub.fips", key(EVIL)));
+        let forged = cert(EVIL, &under, EVIL);
+        let certs = Certs::new();
+        assert_eq!(
+            validate(&certs, &anchors, &forged, NOW),
+            Err(PathError::NoIssuer)
+        );
+        assert_eq!(
+            anchors.anchor_for(&key(EVIL), &format!("x.{overlay}")),
+            None
+        );
+        assert_eq!(
+            anchors
+                .anchor_for(&key(ROOT), &format!("x.{overlay}"))
+                .map(|a| a.kind),
+            Some(AnchorKind::Overlay),
+            "a subdomain of the overlay domain is the key's"
+        );
+        assert!(anchors.add("example.org", key(ROOT)));
+        assert_eq!(
+            anchors
+                .anchor_for(&key(ROOT), "deep.sales.example.org")
+                .map(|a| a.domain),
+            Some("example.org".to_string())
+        );
+        assert_eq!(anchors.anchor_for(&key(ROOT), "example.net"), None);
+    }
+
+    #[test]
+    fn equal_inputs_give_the_same_path_whatever_the_table_order() {
+        // Two anchored keys delegate to ONLINE in the same second.
+        let r1 = ca(ROOT, "example.org", ONLINE);
+        let r2 = ca(9, "example.org", ONLINE);
+        let alice = cert(ONLINE, "alice@example.org", ALICE);
+        let mut anchors = Anchors::new();
+        anchors.add("example.org", key(ROOT));
+        anchors.add("example.org", key(9));
+        let mut seen = std::collections::HashSet::new();
+        for order in [[&r1, &r2, &alice], [&r2, &r1, &alice], [&alice, &r2, &r1]] {
+            let mut certs = Certs::new();
+            for c in order {
+                certs.insert(c.clone(), NOW).unwrap();
+            }
+            let p = validate(&certs, &anchors, &alice, NOW).unwrap();
+            seen.insert(p.anchor.issuer);
+            // And resolve, with a second same-age certificate by the
+            // other anchored key: the lower issuer key wins the tie.
+            certs
+                .insert(cert(9, "alice@example.org", ALICE), NOW)
+                .unwrap();
+            certs
+                .insert(cert(ROOT, "alice@example.org", ALICE), NOW)
+                .unwrap();
+            match resolve(&certs, &anchors, &name("alice@example.org"), NOW) {
+                Resolution::Verified(p) => assert_eq!(p.cert().issuer, key(ROOT)),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(seen.len(), 1, "one anchor on every run");
+        assert_eq!(seen.into_iter().next(), Some(key(ROOT)), "the lower key");
+    }
+
+    #[test]
+    fn pruning_forgets_expired_certificates_and_untrusted_issuers_not_floors() {
+        let alice = cert(ROOT, "alice@example.org", ALICE);
+        let mut gone = cert(ROOT, "bob@example.org", BOB);
+        gone.expiration = NOW;
+        let forged = cert(EVIL, "alice@example.org", EVIL);
+        let (mut certs, anchors) = world(&[alice.clone(), gone.clone(), forged]);
+        assert_eq!(certs.prune_expired(NOW), 1);
+        assert_eq!(certs.len(), 2);
+        let mut older = gone.clone();
+        older.created_at -= 1;
+        older.expiration = NOW + DAY;
+        assert_eq!(
+            certs.insert(older, NOW),
+            Err(Ignored::Stale),
+            "the floor outlives the certificate"
+        );
+        assert_eq!(
+            certs.insert(gone.clone(), NOW),
+            Ok(()),
+            "the same one may return"
+        );
+        assert_eq!(
+            validate(&certs, &anchors, &gone, NOW),
+            Err(PathError::Expired)
+        );
+        assert_eq!(certs.prune_expired(NOW), 1);
+        certs.retain_issuers(|k| anchors.anchor_for(k, "example.org").is_some());
+        assert_eq!(certs.len(), 1);
+        assert!(certs.seen().iter().all(|(k, _, _)| *k == key(ROOT)));
+        assert!(validate(&certs, &anchors, &alice, NOW).is_ok());
     }
 
     #[test]

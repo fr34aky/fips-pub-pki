@@ -71,18 +71,24 @@ same domain: **disputed**, neither used. A revoked, expired or rolled-back
 link invalidates everything below it.
 
 As implemented (`pubpki_core::path`): the verifier's knowledge is two
-tables, `Anchors` (issuer pins per domain; the key of `<npub>.fips` is
-anchored for that domain by structure, reported as `Overlay`) and `Certs`
-(the newest certificate per (issuer, `d`), with the floor of §6).
+tables, `Anchors` (issuer pins per domain, normalized, never a single
+label; the key of `<npub>.fips` is anchored for that domain by structure,
+reported as `Overlay`, and the walk up the domain stops there) and
+`Certs` (the newest certificate per (issuer, `d`), with the floor of §6;
+`prune_expired` and `retain_issuers` let the store bound what untrusted
+relay traffic can grow: nothing from an issuer that is neither anchored
+nor certified needs remembering).
 `validate` walks up: a link fails as `Future`, `Revoked` (also when the
 newer event known is the marker), `Superseded`, `Expired`, `NoIssuer`,
 `TooLong` or `Pathlen`, and a failure above the certificate is reported
 as `Via(<sub-issuer d>, …)`. Sub-issuer candidates are tried nearest `E`
-first, then newest; the first that validates wins; a certificate is never
-its own candidate and no (issuer, `d`) appears twice in a path. `resolve`
+first, then newest, then by issuer key and name, so equal inputs give
+equal paths on every verifier; the first that validates wins; a key's
+delegation to itself is no candidate and no (issuer, `d`) appears twice
+in a path. `resolve`
 validates every issuer's newest certificate for the name: `Verified`
-(the shortest valid path, then the newest; all valid paths name the same
-subject keys), `Disputed` (valid paths disagree), `Refused` (none
+(the shortest valid path, then the newest, then the lower issuer key; all
+valid paths name the same subject keys), `Disputed` (valid paths disagree), `Refused` (none
 validates; the errors, newest first) or `Unknown`. `names_of` lists the
 valid certificates naming a key.
 
