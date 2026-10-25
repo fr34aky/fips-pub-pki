@@ -95,9 +95,6 @@ impl Bundle {
     pub fn validate(&self, known: &Certs, anchors: &Anchors, now: u64) -> Result<Path, PathError> {
         let mut table = Certs::new();
         for c in &self.certs {
-            if let Some(at) = known.newest_seen(&c.issuer, &c.name) {
-                table.set_floor(c.issuer, c.name.clone(), at);
-            }
             if let Some(have) = known.get(&c.issuer, &c.name) {
                 let _ = table.insert(have.clone(), now);
             }
@@ -106,11 +103,26 @@ impl Bundle {
             let _ = table.insert(s.clone(), now);
         }
         for c in &self.certs {
-            // Stale or future ones are refused here and, if the path
-            // needs them, named by validate.
+            // Older than a known certificate or future: refused here and,
+            // if the path needs them, named by validate.
             let _ = table.insert(c.clone(), now);
         }
-        validate(&table, anchors, self.cert(), now)
+        let path = validate(&table, anchors, self.cert(), now)?;
+        // The floors (what was seen, certificate gone) are checked on the
+        // path found, so a stale link is named rather than merely missing.
+        for (i, c) in path.certs.iter().enumerate() {
+            if known
+                .newest_seen(&c.issuer, &c.name)
+                .is_some_and(|seen| seen > c.created_at)
+            {
+                let mut e = PathError::Superseded;
+                for s in path.certs[1..=i].iter().rev() {
+                    e = PathError::Via(s.name.to_string(), Box::new(e));
+                }
+                return Err(e);
+            }
+        }
+        Ok(path)
     }
 
     /// The `fips-ca` claims of `issuer` that cover `domain`: for the
@@ -192,6 +204,10 @@ mod tests {
             relays: Vec::new(),
             created_at: NOW - 60,
         }
+    }
+
+    fn name(s: &str) -> Name {
+        Name::parse(s).unwrap()
     }
 
     fn event(c: &Certificate) -> Event {
@@ -334,6 +350,23 @@ mod tests {
         newer.created_at = NOW;
         let mut known = Certs::new();
         known.insert(newer, NOW).unwrap();
+        assert_eq!(
+            b.validate(&known, &anchors, NOW),
+            Err(PathError::Superseded)
+        );
+        // Only the floor remains of the newer delegation (a restart): the
+        // bundle's older copy is named as superseded, not merely missing.
+        let mut known = Certs::new();
+        known.set_floor(key(1), name("_@example.org"), NOW);
+        assert_eq!(
+            b.validate(&known, &anchors, NOW),
+            Err(PathError::Via(
+                "_@example.org".into(),
+                Box::new(PathError::Superseded)
+            ))
+        );
+        let mut known = Certs::new();
+        known.set_floor(key(2), name("alice@example.org"), NOW);
         assert_eq!(
             b.validate(&known, &anchors, NOW),
             Err(PathError::Superseded)

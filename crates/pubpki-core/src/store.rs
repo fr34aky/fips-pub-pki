@@ -210,9 +210,10 @@ impl Snapshot {
 
     /// Is `author` worth remembering? An issuer placed for some domain,
     /// an author already in the file (trusted once, its floors stay so
-    /// what it revoked stays revoked), or the subject of a sub-issuer
-    /// certificate that validates now. A stranger's self-signed `_@…`
-    /// certificate makes nobody trusted.
+    /// what it revoked stays revoked), an issuer anchored by structure
+    /// for a name it certified (`<npub>.fips`), or the subject of a
+    /// sub-issuer certificate that validates now. A stranger's
+    /// self-signed `_@…` certificate makes nobody trusted.
     pub fn is_trusted_author(&self, certs: &Certs, author: &Npub, now: u64) -> bool {
         if self.issuers.iter().any(|p| p.npub == *author)
             || self.seen.iter().any(|(k, _)| k.author == *author)
@@ -221,8 +222,12 @@ impl Snapshot {
         }
         let anchors = self.anchors();
         certs
-            .by_subject(author)
-            .any(|c: &Certificate| c.is_ca() && validate(certs, &anchors, c, now).is_ok())
+            .iter()
+            .filter(|c| c.issuer == *author)
+            .any(|c| anchors.anchor_for(author, &c.name.domain).is_some())
+            || certs
+                .by_subject(author)
+                .any(|c: &Certificate| c.is_ca() && validate(certs, &anchors, c, now).is_ok())
     }
 }
 
@@ -482,6 +487,14 @@ mod tests {
             !s.is_trusted_author(&certs, &key(8), NOW),
             "certified by a stranger"
         );
+        let overlay = key(7).fips_name();
+        certs
+            .insert(cert(7, &format!("alice@{overlay}"), 4, &[]), NOW)
+            .unwrap();
+        assert!(
+            s.is_trusted_author(&certs, &key(7), NOW),
+            "anchored by structure for its own overlay domain"
+        );
         // record() admits trusted authors only, and merges: the claim
         // entry stays, timestamps move forward only.
         let trusted: Vec<Npub> = (1..=8)
@@ -489,7 +502,7 @@ mod tests {
             .filter(|a| s.is_trusted_author(&certs, a, NOW))
             .collect();
         s.record(&certs, |a| trusted.contains(a));
-        assert_eq!(s.seen.len(), 2);
+        assert_eq!(s.seen.len(), 3, "the claim, the root's, the overlay key's");
         assert!(
             s.seen
                 .iter()

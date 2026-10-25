@@ -1,13 +1,30 @@
 //! I/O for fips-pub-pki: everything `pubpki-core` deliberately does not
 //! do. Relays, the issuer's DNSSEC proof and keys come from
-//! `pubdom-resolve` (`RelayClient::fetch_raw`, `proof::verify_chain_for`,
-//! `load_keys`); encryption is NIP-44 through the nostr-sdk it re-exports.
+//! `pubdom-resolve` (`RelayClient::fetch_raw`, `proof::DnssecProofs`,
+//! `load_keys`); encryption is NIP-44 through nostr-sdk.
+//!
+//! - [`Verifier`]: the tables fed from relays or a bundle, anchoring, the
+//!   file (spec §2, §4, §6, §7).
+//! - [`sig`]: detached signatures as events (spec §8).
+//! - [`crypto`]: NIP-44 to a key (spec §8).
+//! - [`bundle`]: the bundle as JSON, signatures checked on the way in.
 //!
 //! No `cfg(target_os)` here (docs/architecture.md).
 
+pub mod bundle;
+pub mod config;
+pub mod crypto;
+pub mod sig;
+pub mod store;
+pub mod verifier;
+
+pub use config::Config;
 pub use pubdom_resolve;
 pub use pubdom_resolve::nostr_sdk;
+pub use pubdom_resolve::relay::load_keys;
 pub use pubpki_core;
+pub use store::FileStore;
+pub use verifier::{Anchored, Verifier, VerifyError};
 
 use pubpki_core::pubdom_core::claim::Event as CoreEvent;
 
@@ -39,7 +56,7 @@ mod tests {
         let keys = nostr_sdk::Keys::generate();
         let subject = pubpki_core::pubdom_core::Npub::from_bytes([2; 32]);
         let cert = Certificate {
-            issuer: pubpki_core::pubdom_core::Npub::from_hex(&keys.public_key().to_hex()).unwrap(),
+            issuer: crypto::npub_of(&keys),
             name: Name::parse("alice@example.org").unwrap(),
             subjects: vec![subject],
             expiration: 1_797_776_000,
@@ -55,5 +72,8 @@ mod tests {
         assert_eq!(parsed.issuer, cert.issuer);
         assert_eq!(parsed.subjects, vec![subject]);
         assert_eq!(parsed.name.to_string(), "alice@example.org");
+        let json = bundle::render(std::slice::from_ref(&ev)).unwrap();
+        assert_eq!(bundle::parse(&json).unwrap(), vec![ev]);
+        assert!(bundle::parse("[1]").is_err());
     }
 }

@@ -134,7 +134,7 @@ fn too_far_ahead(cert: &Certificate, now: u64) -> bool {
 /// sub-issuer certificate from another key, naming `issuer`, for a domain
 /// at or above `domain`. Liveness and the rest of spec §4 are the
 /// caller's.
-pub(crate) fn certifies(s: &Certificate, issuer: &Npub, domain: &str) -> bool {
+pub fn certifies(s: &Certificate, issuer: &Npub, domain: &str) -> bool {
     s.is_ca()
         && s.issuer != *issuer
         && s.subjects.contains(issuer)

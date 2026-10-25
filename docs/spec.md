@@ -43,6 +43,22 @@ witnesses; unverified is refused. Live DNS is never consulted by the
 verifier. The issuer tooling uses DNS only to collect the chain it
 publishes (`pubdom_resolve::proof::build_chain_for("fips-ca", …)`).
 
+As implemented (`pubpki::Verifier::anchor_from`): for each `fips-ca`
+claim of the domain not older than the newest seen for (37197, author,
+domain), the chain is checked with `DnssecProofs::check_service` and
+earns `dnssec`; failing that, `pubpki_core::attesting_witnesses` counts
+the configured witnesses whose attestations name the key in the `fips-ca`
+role for the domain (method `dns` or better, verified within 30 days, not
+from the future, each witness once, the issuer itself no witness) and
+`k` or more earn `attested`; `k = 0` turns attestations off. The pin
+goes through `Snapshot::pin` (§6), so a weaker result never replaces a
+stronger pin. Online, `ensure_anchor` places a certificate's issuer by
+fetching the sub-issuer certificates naming it (`#p`) and, where none
+applies, the claims of the name's domain and its ancestors in turn, up
+to `MAX_PATH` deep; an overlay domain `<npub>.fips` fetches nothing.
+Relays are asked mesh first (`RelayScope::Offline`), the public ones only
+when the mesh had nothing.
+
 ## 3. Names and certificates
 
 Names: `<local>@<domain>`, `local` in `a-z0-9-_.` (≤ 64), `_` the apex;
@@ -166,6 +182,12 @@ A detached signature is a kind 9200 event, never published, with
 `["x", sha256(data)]`; verification hashes the data, checks the event,
 and resolves the signer through a certificate allowing `sign`.
 Encryption is NIP-44 v2 to each `p` of a certificate allowing `encrypt`.
+
+As implemented: `pubpki::sig::sign_detached` writes `x`, the optional
+`m` and `size` (`pubpki_core::Signature::tags`); `verify_detached` checks
+the event signature, then `Signature::covers` (hash, and size if stated).
+`pubpki::crypto::encrypt`/`decrypt` wrap nostr-sdk's NIP-44 v2 for one
+recipient key.
 
 ## 9. Privacy
 

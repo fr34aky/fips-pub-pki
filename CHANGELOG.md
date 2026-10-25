@@ -37,3 +37,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   certificates, `fips-ca` claims and attestations with the failing
   event's position in the error, validates against what the verifier
   already knows, and lists what the I/O crate must verify to anchor it.
+- `pubpki_core::sig` (detached signatures: the `x`/`m`/`size` tags and
+  the match against the data) and `pubpki_core::anchoring`
+  (`attesting_witnesses`, the witness-counting rule).
+- The `pubpki` crate: `Verifier` (certificates from relays by name or
+  key, issuers anchored from their claims' chains or from `k` witnesses,
+  delegations followed by `#p`, `resolve`, `names_of`, offline bundle
+  verification, retention and the issuers file), `Config`
+  (`/etc/fips-pubpki/config.yaml`), `FileStore`, NIP-44 `encrypt`/
+  `decrypt`, `sign_detached`/`verify_detached`, the bundle as JSON with
+  every signature checked.

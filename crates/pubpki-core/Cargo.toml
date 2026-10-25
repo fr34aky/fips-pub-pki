@@ -12,6 +12,7 @@ description = "Policy core of fips-pub-pki: names, certificates, sub-issuer scop
 [dependencies]
 pubdom-core.workspace = true
 serde.workspace = true
+sha2 = "0.10"
 thiserror.workspace = true
 
 [dev-dependencies]

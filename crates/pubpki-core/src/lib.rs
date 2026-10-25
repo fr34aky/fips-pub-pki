@@ -8,18 +8,24 @@
 //! Signature checking is the relay client's job (nostr-sdk verifies on
 //! receipt); here we trust `pubkey`, as `pubdom-core` does.
 
+pub mod anchoring;
 pub mod bundle;
 pub mod cert;
 pub mod name;
 pub mod path;
+pub mod sig;
 pub mod store;
 
+pub use anchoring::attesting_witnesses;
 pub use bundle::{Bundle, BundleError, MAX_BUNDLE_EVENTS};
 pub use cert::{CertError, Certificate, Usage};
 pub use name::Name;
-pub use path::{Anchor, AnchorKind, Anchors, Certs, Ignored, Path, PathError, Resolution};
+pub use path::{
+    Anchor, AnchorKind, Anchors, Certs, Ignored, Path, PathError, Resolution, certifies,
+};
 /// The crate this one builds on, re-exported so consumers use one version.
 pub use pubdom_core;
+pub use sig::{SigError, Signature, digest};
 pub use store::{IssuerMethod, IssuerPin, IssuerStore, MemoryStore, PinChange, SeenKey, Snapshot};
 
 /// Nostr kinds. Placeholders until registered (docs/nip.md).
