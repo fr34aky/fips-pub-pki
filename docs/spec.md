@@ -70,6 +70,22 @@ Conflicting live certificates for one `d` from different issuers of the
 same domain: **disputed**, neither used. A revoked, expired or rolled-back
 link invalidates everything below it.
 
+As implemented (`pubpki_core::path`): the verifier's knowledge is two
+tables, `Anchors` (issuer pins per domain; the key of `<npub>.fips` is
+anchored for that domain by structure, reported as `Overlay`) and `Certs`
+(the newest certificate per (issuer, `d`), with the floor of §6).
+`validate` walks up: a link fails as `Future`, `Revoked` (also when the
+newer event known is the marker), `Superseded`, `Expired`, `NoIssuer`,
+`TooLong` or `Pathlen`, and a failure above the certificate is reported
+as `Via(<sub-issuer d>, …)`. Sub-issuer candidates are tried nearest `E`
+first, then newest; the first that validates wins; a certificate is never
+its own candidate and no (issuer, `d`) appears twice in a path. `resolve`
+validates every issuer's newest certificate for the name: `Verified`
+(the shortest valid path, then the newest; all valid paths name the same
+subject keys), `Disputed` (valid paths disagree), `Refused` (none
+validates; the errors, newest first) or `Unknown`. `names_of` lists the
+valid certificates naming a key.
+
 ## 5. Revocation
 
 Short validity (`DEFAULT_VALIDITY_SECS` = 90 days) plus renewal; the

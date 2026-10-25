@@ -20,3 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlay issuer, the "under a domain" rule) and
   `pubpki_core::Certificate` (parse and build, usages, the sub-issuer
   scope rule `may_issue_for`), under test.
+- `pubpki_core::path`: path validation over the verifier's tables —
+  `Anchors` (issuers pinned per domain, the `<npub>.fips` overlay rule),
+  `Certs` (the newest certificate per issuer and name, the anti-rollback
+  floor), `validate`, `resolve` (verified, disputed, refused, unknown)
+  and `names_of`; revocation, expiry, rollback and `pathlen` are checked
+  on every link and reported with the link's name.

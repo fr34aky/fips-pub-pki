@@ -9,7 +9,7 @@ policy with no I/O and is tested with tables.
 |---|---|
 | `name` | `Name`: `<local>@<domain>` parsing and display, the apex `_@domain`, the bare-key overlay issuer (`<npub>.fips`), `is_under(domain, scope)` — the sub-issuer scope rule |
 | `cert` | `Certificate`: kind 37200 parse and build with the size limits, `Usage`, `allows`, `is_ca`, `is_live_at`, `may_issue_for` |
-| *(next)* `path` | path validation (spec §4): anchored and certified issuers, nearest `_@E`, `pathlen`, `MAX_PATH`, disputes |
+| `path` | path validation (spec §4): `Anchors` (pinned issuers by domain, the overlay rule), `Certs` (newest per (issuer, name), the anti-rollback floor, `seen()` for the store), `validate`, `resolve` (`Verified`/`Disputed`/`Refused`/`Unknown`), `names_of`; nearest `_@E`, `pathlen`, `MAX_PATH`, errors named up the path (`PathError::Via`) |
 | *(next)* `store` | the issuer pin file's types and the anti-rollback table (spec §6), a trait like `pubdom_core::PinStore` |
 | *(next)* `bundle` | the offline bundle (spec §7): parse, order, validate |
 | *(next)* `sig` | detached signature events (spec §8) |
