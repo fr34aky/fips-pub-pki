@@ -121,13 +121,24 @@ impl Anchors {
 }
 
 /// A domain one can pin an issuer for: normalized, at least two labels.
-fn pin_domain(domain: &str) -> Option<String> {
+pub(crate) fn pin_domain(domain: &str) -> Option<String> {
     normalize(domain).filter(|d| d.contains('.'))
 }
 
 /// Dated more than `MAX_FUTURE_SECS` ahead of `now` (NIP-DB's rule).
 fn too_far_ahead(cert: &Certificate, now: u64) -> bool {
     cert.created_at > now.saturating_add(MAX_FUTURE_SECS)
+}
+
+/// Does `s` make `issuer` an issuer for names under `domain`? A live
+/// sub-issuer certificate from another key, naming `issuer`, for a domain
+/// at or above `domain`. Liveness and the rest of spec §4 are the
+/// caller's.
+pub(crate) fn certifies(s: &Certificate, issuer: &Npub, domain: &str) -> bool {
+    s.is_ca()
+        && s.issuer != *issuer
+        && s.subjects.contains(issuer)
+        && is_under(domain, &s.name.domain)
 }
 
 /// Why a certificate was not taken into [`Certs`].
@@ -258,7 +269,7 @@ impl Certs {
 
     /// The newest known `created_at` for (issuer, name), from the table
     /// or the floor.
-    fn newest_seen(&self, issuer: &Npub, name: &Name) -> Option<u64> {
+    pub fn newest_seen(&self, issuer: &Npub, name: &Name) -> Option<u64> {
         let key = (*issuer, name.clone());
         let a = self.newest.get(&key).map(|c| c.created_at);
         let b = self.floor.get(&key).copied();
@@ -383,10 +394,7 @@ fn build(
     let mut candidates: Vec<&Certificate> = certs
         .iter()
         .filter(|s| {
-            s.is_ca()
-                && s.issuer != cert.issuer
-                && s.subjects.contains(&cert.issuer)
-                && is_under(&cert.name.domain, &s.name.domain)
+            certifies(s, &cert.issuer, &cert.name.domain)
                 && !trail.iter().any(|(i, n)| *i == s.issuer && *n == s.name)
         })
         .collect();

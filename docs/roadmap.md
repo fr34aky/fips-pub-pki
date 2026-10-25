@@ -16,29 +16,34 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
   (`Anchors`, `Certs`): anchored and certified issuers, nearest `_@E`,
   `pathlen`, `MAX_PATH`, revocation and rollback along the path,
   disputes; thirteen table tests from spec §4 and nip.md.
+- 2026-10-25: `pubpki_core::store` (the issuer file's types, pin and
+  unpin by strength, floors to and from `Certs`, the trusted-author rule
+  that bounds the file) and `pubpki_core::bundle` (sort, per-event
+  errors, validation against what is known, what the I/O crate must
+  verify); eight tests.
 
 ## Next, in order
 
-1. **`pubpki-core::store` and `bundle`** — the issuer pin file's types
-   (`Anchors` with method and `verified_at`, `Certs::seen()` as the
-   anti-rollback table), the offline bundle's parse and validation.
-2. **`pubpki`** — relay fetch of kind 37200 by `#d` and `#p` through
-   `fetch_raw`, the issuer's claim and chain through `pubdom-resolve`,
-   the issuer pin file on disk, NIP-44 helpers, detached signatures.
-3. **`fips-pubpki`** — `ca init|issue|issue-ca|renew|revoke|publish|status`,
+1. **`pubpki`** — relay fetch of kind 37200 by `#d` and `#p` through
+   `fetch_raw`, the issuer's claim and chain through `pubdom-resolve`
+   (anchoring with the method earned), the issuer file on disk as a
+   `FileStore` written atomically, bundle signature checks, NIP-44
+   helpers, detached signatures (`pubpki_core::sig` first, if it stays
+   policy-only).
+2. **`fips-pubpki`** — `ca init|issue|issue-ca|renew|revoke|publish|status`,
    `resolve`, `verify [--bundle]`, `bundle`, `sign`, `verify-sig`,
    `encrypt`, `decrypt`, `nostr-json`. `ca renew --watch` re-issues
    every live certificate halfway through its remaining validity, the
    loop `fips-pubdom-server` runs for its chain: automatic renewal is
    issuer-driven and needs no protocol change (an addressable event
    re-published with a later `created_at`).
-4. **Live** (each on the user's word): a `_fips-ca` record for the demo
+3. **Live** (each on the user's word): a `_fips-ca` record for the demo
    domain and an issuer claim with its chain; certificates on the mesh
    relay; an offline verification on the second node with no Internet;
    a bare-key issuer with no domain.
-5. **Phone**: `name@domain` in fips2go's contacts with its own issuer
+4. **Phone**: `name@domain` in fips2go's contacts with its own issuer
    pins; no sign/encrypt tooling in the resolver.
-6. **Registration and the NIP**: kind numbers and the NIP-DC submission,
+5. **Registration and the NIP**: kind numbers and the NIP-DC submission,
    on the user's word, after the reference implementation.
 
 ## Later

@@ -2,21 +2,25 @@
 //! which a key bound to a domain certifies other keys, with no I/O. The
 //! issuer binding itself is `pubdom-core`'s (NIP-DB, the `fips-ca` role);
 //! this crate adds names, certificates, the sub-issuer scope rule, path
-//! validation with revocation and anti-rollback, and, in time, the
-//! offline bundle.
+//! validation with revocation and anti-rollback, the verifier's store
+//! and the offline bundle.
 //!
 //! Signature checking is the relay client's job (nostr-sdk verifies on
 //! receipt); here we trust `pubkey`, as `pubdom-core` does.
 
+pub mod bundle;
 pub mod cert;
 pub mod name;
 pub mod path;
+pub mod store;
 
+pub use bundle::{Bundle, BundleError, MAX_BUNDLE_EVENTS};
 pub use cert::{CertError, Certificate, Usage};
 pub use name::Name;
 pub use path::{Anchor, AnchorKind, Anchors, Certs, Ignored, Path, PathError, Resolution};
 /// The crate this one builds on, re-exported so consumers use one version.
 pub use pubdom_core;
+pub use store::{IssuerMethod, IssuerPin, IssuerStore, MemoryStore, PinChange, SeenKey, Snapshot};
 
 /// Nostr kinds. Placeholders until registered (docs/nip.md).
 pub const KIND_CERT: u16 = 37200;
