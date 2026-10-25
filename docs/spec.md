@@ -123,12 +123,17 @@ neither install nor withdraw a DNSSEC-verified issuer and no verification
 touches a hand-configured one. Domains are normalized and a single label
 is never pinned. The `seen` key's `d` is the certificate's name or the
 claim's domain; entries for kind 37200 are rebuilt from `Certs::seen()`
-at save time (`record`), entries for the issuers' claims are kept with
-`note_seen`. The file holds entries for trusted authors only: issuers
-placed for some domain and subjects of live sub-issuer certificates
-(`is_trusted_author`, `retain_authors`, `Certs::retain_issuers`), and
-expired certificates are pruned with their timestamps kept as floors, so
-relay traffic from strangers never grows it.
+at save time (`record`: timestamps move forward only, and entries the
+running table does not know stay, so a short-lived run cannot erase the
+floor), entries for the issuers' claims are kept with `note_seen`. The
+file admits trusted authors only: issuers placed for some domain,
+subjects of sub-issuer certificates that validate now, and authors
+already in the file (trusted once, their floors stay, so what they
+revoked stays revoked even after their delegation lapsed); a stranger's
+self-signed `_@…` certificate makes nobody trusted (`is_trusted_author`).
+`Certs::retain_issuers` bounds the running table the same way, expired
+certificates are pruned with their timestamps kept as floors, and
+`retain_authors` is the operator's explicit forget, never routine.
 
 ## 7. The offline bundle
 
@@ -142,13 +147,17 @@ them to `pubdom_core::Event` and calls `Bundle::from_events`, which
 requires the first event to be a certificate, accepts at most
 `MAX_BUNDLE_EVENTS` (32), refuses any other kind, and parses each event
 with the error naming its position. `anchors_needed` lists the issuers no
-certificate in the bundle certifies, with their domains; for each, the
-I/O crate verifies the bundle's `fips-ca` claim (`claims_of`: the chain
-through `pubdom_resolve::proof`, or `attestations_of` against its
-configured witnesses) and, on success, anchors the key with the method
-earned. A bare-key issuer (`<npub>.fips`) needs no claim. `validate`
-then runs §4 over the bundle's certificates added to the verifier's own
-table; what the verifier already knows wins, so a bundle cannot roll a
+certificate in the bundle certifies for its domain (the scope rule of
+§4), with the domain the anchor must cover; for each, the I/O crate
+verifies a `fips-ca` claim of that issuer for the domain or one above it
+(`claims_of`: the chain through `pubdom_resolve::proof`, or
+`attestations_of` against its configured witnesses) and, on success,
+anchors the key for the claim's domain with the method earned. A
+bare-key issuer (`<npub>.fips`) needs no claim. `validate` then runs §4
+over the bundle's certificates added to what the verifier knows that can
+matter (the entries they collide with, and its sub-issuer certificates,
+so a bundle that left the delegation out still validates for a verifier
+holding it); what the verifier knows wins, so a bundle cannot roll a
 certificate back below a marker or renewal it has seen.
 
 ## 8. Signing and encryption

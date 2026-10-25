@@ -9,7 +9,7 @@
 
 use crate::cert::Certificate;
 use crate::name::Name;
-use crate::path::{Anchors, Certs};
+use crate::path::{Anchors, Certs, pin_domain, validate};
 use crate::{KIND_CERT, MAX_FUTURE_SECS};
 use pubdom_core::domain::normalize;
 use pubdom_core::{Method, Npub};
@@ -67,10 +67,10 @@ pub struct SeenKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PinChange {
     Added,
-    /// Same key, method at least as strong: `verified_at` and `method`
-    /// updated.
+    /// Same key, a stronger method or a newer verification of the same
+    /// strength: `method` and `verified_at` updated.
     Refreshed,
-    /// A weaker verification than the pin's: nothing changed.
+    /// Weaker, or no newer than what is recorded: nothing changed.
     Kept,
 }
 
@@ -88,7 +88,7 @@ impl Snapshot {
     /// Place an issuer. A single label or an unnormalizable domain pins
     /// nothing (`Kept`), as `Anchors::add` refuses it.
     pub fn pin(&mut self, mut pin: IssuerPin) -> PinChange {
-        let Some(domain) = normalize(&pin.domain).filter(|d| d.contains('.')) else {
+        let Some(domain) = pin_domain(&pin.domain) else {
             return PinChange::Kept;
         };
         pin.domain = domain;
@@ -98,6 +98,10 @@ impl Snapshot {
             .find(|p| p.domain == pin.domain && p.npub == pin.npub)
         {
             Some(have) if pin.method < have.method => PinChange::Kept,
+            Some(have) if pin.method == have.method && pin.verified_at <= have.verified_at => {
+                // A stale verification processed late moves nothing back.
+                PinChange::Kept
+            }
             Some(have) => {
                 have.method = pin.method;
                 have.verified_at = pin.verified_at;
@@ -114,7 +118,7 @@ impl Snapshot {
     /// no longer names the key, verified that strongly; the user, with
     /// `Pinned`). A weaker denial changes nothing. Returns whether it did.
     pub fn unpin(&mut self, domain: &str, npub: &Npub, by: IssuerMethod) -> bool {
-        let Some(domain) = normalize(domain) else {
+        let Some(domain) = pin_domain(domain) else {
             return false;
         };
         let before = self.issuers.len();
@@ -123,9 +127,12 @@ impl Snapshot {
         self.issuers.len() != before
     }
 
-    /// The issuers placed for exactly `domain`.
-    pub fn issuers_for<'a>(&'a self, domain: &'a str) -> impl Iterator<Item = &'a IssuerPin> + 'a {
-        self.issuers.iter().filter(move |p| p.domain == domain)
+    /// The issuers placed for exactly `domain` (normalized here).
+    pub fn issuers_for(&self, domain: &str) -> impl Iterator<Item = &IssuerPin> {
+        let domain = normalize(domain);
+        self.issuers
+            .iter()
+            .filter(move |p| domain.as_deref() == Some(p.domain.as_str()))
     }
 
     /// The anchors table path validation runs against.
@@ -148,19 +155,24 @@ impl Snapshot {
         }
     }
 
-    /// Replace the kind 37200 entries with what `certs` knows; entries of
-    /// other kinds (the issuers' claims) stay.
-    pub fn record(&mut self, certs: &Certs) {
-        self.seen.retain(|(k, _)| k.kind != KIND_CERT);
+    /// Merge what `certs` knows into the kind 37200 entries: timestamps
+    /// only move forward, and an entry `certs` does not know stays, so a
+    /// short-lived run that never loaded the whole table (a bundle check)
+    /// cannot erase the floor. Authors `keep` refuses are not added; the
+    /// file admits trusted authors only ([`Snapshot::is_trusted_author`])
+    /// and keeps them once admitted.
+    pub fn record(&mut self, certs: &Certs, mut keep: impl FnMut(&Npub) -> bool) {
         for (issuer, name, at) in certs.seen() {
-            self.seen.push((
-                SeenKey {
-                    kind: KIND_CERT,
-                    author: issuer,
-                    d: name.to_string(),
-                },
-                at,
-            ));
+            let key = SeenKey {
+                kind: KIND_CERT,
+                author: issuer,
+                d: name.to_string(),
+            };
+            match self.seen.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, have)) => *have = (*have).max(at),
+                None if keep(&issuer) => self.seen.push((key, at)),
+                None => {}
+            }
         }
     }
 
@@ -188,20 +200,29 @@ impl Snapshot {
         }
     }
 
-    /// Keep the anti-rollback entries whose author `keep` accepts. The
-    /// verifier calls it with "is an issuer I placed, or holds a
-    /// sub-issuer certificate", so untrusted authors never grow the file.
+    /// Forget the anti-rollback entries whose author `keep` refuses. An
+    /// operator's explicit clean-up (an issuer withdrawn for good), never
+    /// routine: a forgotten floor reopens replay of what that author
+    /// revoked.
     pub fn retain_authors(&mut self, mut keep: impl FnMut(&Npub) -> bool) {
         self.seen.retain(|(k, _)| keep(&k.author));
     }
 
-    /// Does `cert`'s issuer deserve remembering: an issuer placed for some
-    /// domain, or the subject of a live sub-issuer certificate in `certs`?
+    /// Is `author` worth remembering? An issuer placed for some domain,
+    /// an author already in the file (trusted once, its floors stay so
+    /// what it revoked stays revoked), or the subject of a sub-issuer
+    /// certificate that validates now. A stranger's self-signed `_@…`
+    /// certificate makes nobody trusted.
     pub fn is_trusted_author(&self, certs: &Certs, author: &Npub, now: u64) -> bool {
-        self.issuers.iter().any(|p| p.npub == *author)
-            || certs
-                .by_subject(author)
-                .any(|c: &Certificate| c.is_ca() && c.is_live_at(now))
+        if self.issuers.iter().any(|p| p.npub == *author)
+            || self.seen.iter().any(|(k, _)| k.author == *author)
+        {
+            return true;
+        }
+        let anchors = self.anchors();
+        certs
+            .by_subject(author)
+            .any(|c: &Certificate| c.is_ca() && validate(certs, &anchors, c, now).is_ok())
     }
 }
 
@@ -295,6 +316,12 @@ mod tests {
         );
         assert_eq!(s.issuers[0].verified_at, NOW + 2);
         assert_eq!(
+            s.pin(pin("example.org", 1, IssuerMethod::Dns, NOW + 1)),
+            PinChange::Kept,
+            "an equal verification processed late moves nothing back"
+        );
+        assert_eq!(s.issuers[0].verified_at, NOW + 2);
+        assert_eq!(
             s.pin(pin("example.org", 1, IssuerMethod::Dnssec, NOW + 3)),
             PinChange::Refreshed
         );
@@ -314,6 +341,7 @@ mod tests {
             PinChange::Added
         );
         assert_eq!(s.issuers_for("example.org").count(), 2);
+        assert_eq!(s.issuers_for("Example.ORG.").count(), 2, "normalized");
         // Single labels and junk pin nothing.
         for bad in ["org", "fips", "", "not a domain"] {
             assert_eq!(
@@ -348,6 +376,7 @@ mod tests {
         assert!(!s.unpin("example.org", &key(1), IssuerMethod::Dnssec));
         assert!(s.unpin("example.org", &key(1), IssuerMethod::Pinned));
         assert!(!s.unpin("not a domain", &key(1), IssuerMethod::Pinned));
+        assert!(!s.unpin("org", &key(1), IssuerMethod::Pinned));
     }
 
     #[test]
@@ -357,7 +386,7 @@ mod tests {
         let mut certs = Certs::new();
         let alice = cert(1, "alice@example.org", 4, &[]);
         certs.insert(alice.clone(), NOW).unwrap();
-        s.record(&certs);
+        s.record(&certs, |_| true);
         s.note_seen(
             SeenKey {
                 kind: 37197,
@@ -430,40 +459,70 @@ mod tests {
             "the future is not seen"
         );
         assert_eq!(s.newest_seen(&k), Some(NOW));
-        let evil = SeenKey {
-            kind: KIND_CERT,
-            author: key(6),
-            d: "alice@example.org".into(),
-        };
-        s.note_seen(evil.clone(), NOW, NOW);
+        // Trust for retention: pinned, certified through a valid path, or
+        // already in the file. A stranger's self-signed delegation is none.
         s.pin(pin("example.org", 1, IssuerMethod::Dnssec, NOW));
         let mut certs = Certs::new();
         certs
             .insert(cert(1, "_@example.org", 2, &[Usage::Ca]), NOW)
             .unwrap();
         certs
+            .insert(cert(6, "_@evil.example", 6, &[Usage::Ca]), NOW)
+            .unwrap();
+        certs
+            .insert(cert(6, "_@example.org", 8, &[Usage::Ca]), NOW)
+            .unwrap();
+        certs
             .insert(cert(6, "alice@example.org", 6, &[]), NOW)
             .unwrap();
         assert!(s.is_trusted_author(&certs, &key(1), NOW), "pinned");
         assert!(s.is_trusted_author(&certs, &key(2), NOW), "certified");
-        assert!(!s.is_trusted_author(&certs, &key(6), NOW));
-        let snap = s.clone();
-        s.retain_authors(|a| snap.is_trusted_author(&certs, a, NOW));
-        assert_eq!(s.newest_seen(&evil), None);
-        assert_eq!(s.newest_seen(&k), Some(NOW));
-        // record() replaces the certificate entries and keeps the rest.
-        let trusted: Vec<Npub> = [key(1), key(2), key(6)]
-            .into_iter()
-            .filter(|a| snap.is_trusted_author(&certs, a, NOW))
+        assert!(!s.is_trusted_author(&certs, &key(6), NOW), "self-signed");
+        assert!(
+            !s.is_trusted_author(&certs, &key(8), NOW),
+            "certified by a stranger"
+        );
+        // record() admits trusted authors only, and merges: the claim
+        // entry stays, timestamps move forward only.
+        let trusted: Vec<Npub> = (1..=8)
+            .map(key)
+            .filter(|a| s.is_trusted_author(&certs, a, NOW))
             .collect();
-        certs.retain_issuers(|a| trusted.contains(a));
-        s.record(&certs);
+        s.record(&certs, |a| trusted.contains(a));
         assert_eq!(s.seen.len(), 2);
         assert!(
             s.seen
                 .iter()
                 .any(|(k, _)| k.kind == KIND_CERT && k.author == key(1))
         );
+        assert_eq!(s.newest_seen(&k), Some(NOW));
+        let mut later = Certs::new();
+        let mut renewed = cert(1, "_@example.org", 2, &[Usage::Ca]);
+        renewed.created_at = NOW;
+        later.insert(renewed, NOW).unwrap();
+        s.record(&later, |_| false);
+        let floor = |s: &Snapshot, n: u8, d: &str| {
+            s.newest_seen(&SeenKey {
+                kind: KIND_CERT,
+                author: key(n),
+                d: d.into(),
+            })
+        };
+        assert_eq!(floor(&s, 1, "_@example.org"), Some(NOW), "moved forward");
+        let mut older = Certs::new();
+        older
+            .insert(cert(1, "_@example.org", 2, &[Usage::Ca]), NOW)
+            .unwrap();
+        s.record(&older, |_| true);
+        assert_eq!(floor(&s, 1, "_@example.org"), Some(NOW), "never back");
+        // Once in the file, an author stays trusted even after its
+        // delegation lapsed: what it revoked must stay revoked.
+        s.unpin("example.org", &key(1), IssuerMethod::Pinned);
+        assert!(s.is_trusted_author(&Certs::new(), &key(1), NOW));
+        // retain_authors is the explicit forget.
+        s.retain_authors(|a| *a != key(1));
+        assert!(!s.is_trusted_author(&Certs::new(), &key(1), NOW));
+        assert_eq!(s.newest_seen(&k), None);
     }
 
     #[test]

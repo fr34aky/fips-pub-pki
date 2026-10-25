@@ -12,7 +12,8 @@
 //! it can fill an [`Anchors`] and call [`Bundle::validate`].
 
 use crate::cert::{CertError, Certificate};
-use crate::path::{Anchors, Certs, Path, PathError, validate};
+use crate::name::is_under;
+use crate::path::{Anchors, Certs, Path, PathError, certifies, validate};
 use crate::{KIND_CERT, SERVICE_CA};
 use pubdom_core::claim::{Attestation, ClaimError, Event, ServiceClaim};
 use pubdom_core::{KIND_ATTESTATION, KIND_CLAIM, Npub};
@@ -39,11 +40,10 @@ pub enum BundleError {
     Kind(usize, u16),
 }
 
-/// A parsed bundle. `cert` is the first event, the one to validate.
+/// A parsed bundle. The first certificate is the one to validate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bundle {
-    pub cert: Certificate,
-    /// Every certificate in the bundle, `cert` included, in order.
+    /// Every certificate in the bundle, in order; never empty.
     pub certs: Vec<Certificate>,
     /// The `fips-ca` claims: the issuer bindings to verify.
     pub claims: Vec<ServiceClaim>,
@@ -57,11 +57,7 @@ impl Bundle {
         if events.len() > MAX_BUNDLE_EVENTS {
             return Err(BundleError::TooLarge);
         }
-        if first.kind != KIND_CERT {
-            return Err(BundleError::First(CertError::Kind(first.kind)));
-        }
-        let cert = Certificate::parse(first).map_err(BundleError::First)?;
-        let mut certs = vec![cert.clone()];
+        let mut certs = vec![Certificate::parse(first).map_err(BundleError::First)?];
         let mut claims = Vec::new();
         let mut attestations = Vec::new();
         for (i, ev) in events.iter().enumerate().skip(1) {
@@ -78,66 +74,87 @@ impl Bundle {
             }
         }
         Ok(Self {
-            cert,
             certs,
             claims,
             attestations,
         })
     }
 
+    /// The certificate to validate: the first event.
+    pub fn cert(&self) -> &Certificate {
+        &self.certs[0]
+    }
+
     /// Validate the bundle's certificate at `now`, with the bundle's
     /// certificates added to what the verifier already `known`. What is
     /// known wins: a bundle cannot roll a certificate back below a seen
-    /// marker or renewal.
+    /// marker or renewal. Of the known table only what can matter is
+    /// consulted: the entries the bundle's certificates collide with, and
+    /// the sub-issuer certificates (a verifier that already holds the
+    /// delegation validates a bundle that left it out).
     pub fn validate(&self, known: &Certs, anchors: &Anchors, now: u64) -> Result<Path, PathError> {
-        let mut table = known.clone();
+        let mut table = Certs::new();
+        for c in &self.certs {
+            if let Some(at) = known.newest_seen(&c.issuer, &c.name) {
+                table.set_floor(c.issuer, c.name.clone(), at);
+            }
+            if let Some(have) = known.get(&c.issuer, &c.name) {
+                let _ = table.insert(have.clone(), now);
+            }
+        }
+        for s in known.iter().filter(|s| s.is_ca()) {
+            let _ = table.insert(s.clone(), now);
+        }
         for c in &self.certs {
             // Stale or future ones are refused here and, if the path
             // needs them, named by validate.
             let _ = table.insert(c.clone(), now);
         }
-        validate(&table, anchors, &self.cert, now)
+        validate(&table, anchors, self.cert(), now)
     }
 
-    /// The `fips-ca` claims of `issuer` for `domain`: what the I/O crate
-    /// verifies (chain, witnesses) to anchor the path.
+    /// The `fips-ca` claims of `issuer` that cover `domain`: for the
+    /// domain itself or one above it, as an anchor does. What the I/O
+    /// crate verifies (chain, witnesses) to anchor the path; the claim's
+    /// own `domain` is what gets pinned.
     pub fn claims_of<'a>(
         &'a self,
-        issuer: &'a Npub,
+        issuer: Npub,
         domain: &'a str,
     ) -> impl Iterator<Item = &'a ServiceClaim> + 'a {
         self.claims
             .iter()
-            .filter(move |c| c.author == *issuer && c.domain == domain)
+            .filter(move |c| c.author == issuer && is_under(domain, &c.domain))
     }
 
-    /// The attestations naming `issuer` for `domain` in the `fips-ca`
-    /// role, by witness; the I/O crate counts the configured witnesses
-    /// among them.
+    /// The attestations naming `issuer` in the `fips-ca` role for a domain
+    /// covering `domain`, by witness; the I/O crate counts the configured
+    /// witnesses among them, per attested domain.
     pub fn attestations_of<'a>(
         &'a self,
-        issuer: &'a Npub,
+        issuer: Npub,
         domain: &'a str,
     ) -> impl Iterator<Item = &'a Attestation> + 'a {
         self.attestations.iter().filter(move |a| {
-            a.domain == domain
+            is_under(domain, &a.domain)
                 && a.others
                     .iter()
-                    .any(|(role, k)| role == SERVICE_CA && k == issuer)
+                    .any(|(role, k)| role == SERVICE_CA && *k == issuer)
         })
     }
 
-    /// The issuers the bundle's path would need an anchor for: the author
-    /// of every certificate in it that no other certificate in it
-    /// certifies. Usually one key, the anchored issuer; the I/O crate
-    /// verifies its claim and pins it before [`Bundle::validate`].
+    /// The issuers the bundle's path needs an anchor for, with the domain
+    /// the anchor must cover: the author of every certificate that no
+    /// other certificate in the bundle certifies for its domain. Usually
+    /// one key, the anchored issuer; the I/O crate verifies a claim from
+    /// [`Bundle::claims_of`] and pins it before [`Bundle::validate`].
     pub fn anchors_needed(&self) -> Vec<(Npub, String)> {
         let mut out: Vec<(Npub, String)> = Vec::new();
         for c in &self.certs {
             let certified = self
                 .certs
                 .iter()
-                .any(|s| s.is_ca() && s.issuer != c.issuer && s.subjects.contains(&c.issuer));
+                .any(|s| certifies(s, &c.issuer, &c.name.domain));
             if !certified
                 && !out
                     .iter()
@@ -226,7 +243,7 @@ mod tests {
     fn sorts_the_events_and_names_what_needs_anchoring() {
         let (events, alice, root_ca) = fixture();
         let b = Bundle::from_events(&events).unwrap();
-        assert_eq!(b.cert, alice);
+        assert_eq!(b.cert(), &alice);
         assert_eq!(b.certs, vec![alice, root_ca]);
         assert_eq!(b.claims.len(), 1);
         assert_eq!(b.claims[0].service, SERVICE_CA);
@@ -236,14 +253,48 @@ mod tests {
             b.anchors_needed(),
             vec![(key(1), "example.org".to_string())]
         );
-        assert_eq!(b.claims_of(&key(1), "example.org").count(), 1);
-        assert_eq!(b.claims_of(&key(2), "example.org").count(), 0);
-        assert_eq!(b.claims_of(&key(1), "example.net").count(), 0);
-        assert_eq!(b.attestations_of(&key(1), "example.org").count(), 1);
+        assert_eq!(b.claims_of(key(1), "example.org").count(), 1);
+        assert_eq!(b.claims_of(key(2), "example.org").count(), 0);
+        assert_eq!(b.claims_of(key(1), "example.net").count(), 0);
+        assert_eq!(b.attestations_of(key(1), "example.org").count(), 1);
         assert_eq!(
-            b.attestations_of(&key(9), "example.org").count(),
+            b.attestations_of(key(9), "example.org").count(),
             0,
             "a fips-dns server is not an issuer"
+        );
+        // An anchored issuer issuing below its apex: the anchor needed is
+        // for the department, and the claim for the domain covers it.
+        let sales_ca = cert(1, "_@sales.example.org", 3, &[Usage::Ca]);
+        let bob = cert(3, "bob@sales.example.org", 5, &[]);
+        let b = Bundle::from_events(&[
+            event(&bob),
+            event(&sales_ca),
+            claim(1, "example.org"),
+            attestation(7, "example.org", 1),
+        ])
+        .unwrap();
+        assert_eq!(
+            b.anchors_needed(),
+            vec![(key(1), "sales.example.org".to_string())]
+        );
+        assert_eq!(b.claims_of(key(1), "sales.example.org").count(), 1);
+        assert_eq!(b.attestations_of(key(1), "sales.example.org").count(), 1);
+        assert_eq!(b.claims_of(key(1), "example.net").count(), 0);
+        let mut anchors = Anchors::new();
+        let pinned = b.claims_of(key(1), "sales.example.org").next().unwrap();
+        anchors.add(&pinned.domain, key(1));
+        assert_eq!(b.validate(&Certs::new(), &anchors, NOW).unwrap().len(), 2);
+        // A delegation for an unrelated domain certifies nobody here.
+        let other = cert(8, "_@other.net", 2, &[Usage::Ca]);
+        let (events, _, _) = fixture();
+        let b = Bundle::from_events(&[events[0].clone(), event(&other), claim(2, "example.org")])
+            .unwrap();
+        assert_eq!(
+            b.anchors_needed(),
+            vec![
+                (key(2), "example.org".to_string()),
+                (key(8), "other.net".to_string())
+            ]
         );
     }
 
@@ -286,6 +337,19 @@ mod tests {
         assert_eq!(
             b.validate(&known, &anchors, NOW),
             Err(PathError::Superseded)
+        );
+        // A verifier that already holds the delegation validates a bundle
+        // that left it out; unrelated known certificates play no part.
+        let mut known = Certs::new();
+        known.insert(root_ca.clone(), NOW).unwrap();
+        known
+            .insert(cert(1, "carol@example.org", 9, &[]), NOW)
+            .unwrap();
+        let short = Bundle::from_events(&[event(&alice)]).unwrap();
+        assert_eq!(short.validate(&known, &anchors, NOW).unwrap().len(), 2);
+        assert_eq!(
+            short.validate(&Certs::new(), &anchors, NOW),
+            Err(PathError::NoIssuer)
         );
         // A bare-key issuer needs no claim at all.
         let issuer = key(5);
