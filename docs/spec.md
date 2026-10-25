@@ -1,0 +1,128 @@
+# fips-pub-pki: the protocol as this implementation applies it
+
+The protocol is [nip.md](nip.md) (NIP-DC, Domain Certificates). This
+document is what the code does with it: the trust model and precedence,
+path validation as implemented, storage, the bundle, and the decisions.
+Section numbers are referenced from the code.
+
+## 1. Goals and non-goals
+
+Goals:
+
+- Bind `alice@example.org` (and the domain's services, and sub-issuers)
+  to Nostr keys by signed events, verifiable offline, anchored either in
+  a public domain through NIP-DB's `fips-ca` role or in a bare key on the
+  mesh.
+- Rely on Nostr and fips, not on public centralized services: the
+  verifier never queries DNS; relays on the mesh come first.
+- Make delegation safe by structure: a sub-issuer's reach is the `d` of
+  its certificate.
+
+Non-goals: a global registry of names; TLS or X.509; validation of
+signatures after the certificate's expiry; multi-recipient encryption
+below the application (NIP-59 is the application's choice).
+
+## 2. Trust model
+
+An **anchored issuer** for domain `D` is:
+
+- a key named by `_fips-ca.D TXT` whose kind 37197 claim with
+  `["service","fips-ca"]` the verifier accepts per NIP-DB: by its own
+  issuer pin, by the chain in the claim's `fips-ca` `dnssec` tag, or by
+  `k` configured witnesses whose attestations carry `["p", key, "fips-ca"]`;
+  or
+- the key `<npub>` of the overlay domain `<npub>.fips`, when the verifier
+  has pinned or configured it.
+
+A **certified issuer** holds a live sub-issuer certificate (`_@E`,
+`usage ca`) from an anchored or certified issuer, and may issue for names
+under `E` (§4).
+
+Precedence for the issuer binding, as NIP-DB: pin ≥ chain in the claim ≥
+witnesses; unverified is refused. Live DNS is never consulted by the
+verifier. The issuer tooling uses DNS only to collect the chain it
+publishes (`pubdom_resolve::proof::build_chain_for("fips-ca", …)`).
+
+## 3. Names and certificates
+
+Names: `<local>@<domain>`, `local` in `a-z0-9-_.` (≤ 64), `_` the apex;
+domain normalized as NIP-DB's (`pubpki_core::Name`). Certificates: kind
+37200 as nip.md, parsed by `pubpki_core::Certificate` with the limits
+`MAX_TAGS` (300), `MAX_SUBJECTS` (16), `MAX_RELAY_HINTS` (8). `d` must be
+canonical. Absent `usage` means `sign` and `encrypt`; `ca` is never
+implied, and only on an apex certificate makes a sub-issuer.
+
+## 4. Path validation
+
+Given certificate `C` for name `N` (domain `D`) at `now`:
+
+1. `C` parses, `now < expiration`, no `revoked` tag, and `created_at` is
+   not below the newest seen for (37200, issuer, `d`) (§6).
+2. If `C.issuer` is an anchored issuer for `D` or a domain above `D`:
+   done.
+3. Else find a live sub-issuer certificate `S` with `p ∋ C.issuer`,
+   `d = _@E`, `is_under(D, E)`, preferring the nearest `E`; validate `S`
+   recursively with `D := E`; honour `S.pathlen` against the count of
+   sub-issuer certificates below `S`.
+4. At most `MAX_PATH` = 4 certificates in the path.
+
+Conflicting live certificates for one `d` from different issuers of the
+same domain: **disputed**, neither used. A revoked, expired or rolled-back
+link invalidates everything below it.
+
+## 5. Revocation
+
+Short validity (`DEFAULT_VALIDITY_SECS` = 90 days) plus renewal; the
+explicit marker (same `d`, same `p`, later `created_at`, `revoked`,
+`expiration` = the revoked certificate's); NIP-09 as a courtesy. An
+anchored issuer is withdrawn by the TXT record; a certified one by
+revoking its sub-issuer certificate.
+
+## 6. Freshness, anti-rollback, storage
+
+Per (kind, issuer, `d`) the highest `created_at` seen is kept; older
+events are ignored; events more than `MAX_FUTURE_SECS` (600 s) in the
+future are ignored. Storage is `/var/lib/fips-pubpki/issuers.json`:
+
+```jsonc
+{
+  "issuers": [ { "domain": "example.org", "npub": "npub1…", "method": "dnssec", "verified_at": 1790000000 } ],
+  "seen":    [ [ { "kind": 37200, "author": "npub1…", "d": "alice@example.org" }, 1790000000 ] ]
+}
+```
+
+Its own file: the fips-pubdom pin file is shared with the phone and not
+touched. `method` ranks as NIP-DB's (`attested < dns-single < dns <
+dnssec`; a configured bare key is `pinned`); an issuer pin changes only
+through a verification at least as strong.
+
+## 7. The offline bundle
+
+A JSON array of events: the certificate, the sub-issuer certificates up
+the path, the anchored issuer's kind 37197 claim with its `fips-ca` chain,
+optional kind 37198 attestations. `fips-pubpki verify --bundle` runs §4 on
+it with no network; `fips-pubpki bundle <name>` produces it.
+
+## 8. Signing and encryption
+
+A detached signature is a kind 9200 event, never published, with
+`["x", sha256(data)]`; verification hashes the data, checks the event,
+and resolves the signer through a certificate allowing `sign`.
+Encryption is NIP-44 v2 to each `p` of a certificate allowing `encrypt`.
+
+## 9. Privacy
+
+`#d` queries disclose the names a client looks up; prefer mesh relays
+and relays one trusts; cache. Issuers publish where their subjects'
+correspondents can read without the Internet.
+
+## 10. Decisions and open questions
+
+- Separate project on fips-pub-domains (2026-10-25); see
+  [design-history.md](design-history.md).
+- Kind numbers 37200 and 9200 are provisional; registration and the NIP
+  submission happen on the maintainer's word.
+- Open: whether `fips-pubdom-server` publishes a domain's `fips-ca` claim
+  on the issuer's behalf (it keeps the `fips-dns` chain fresh already) or
+  the issuer tooling does it alone; whether the phone should resolve
+  names in contacts in v1.

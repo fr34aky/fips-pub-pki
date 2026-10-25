@@ -1,0 +1,15 @@
+[package]
+name = "pubpki-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "fips-pubpki"
+path = "src/main.rs"
+
+[dependencies]
+pubpki.workspace = true
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }

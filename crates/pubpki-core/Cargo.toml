@@ -1,0 +1,15 @@
+[package]
+name = "pubpki-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Policy core of fips-pub-pki: names, certificates, sub-issuer scope, path validation; no I/O"
+
+# Rule (docs/architecture.md): nothing platform-specific in here. The
+# phone embeds this crate, so it must build for every target without
+# cfg(target_os).
+[dependencies]
+pubdom-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true

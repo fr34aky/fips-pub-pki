@@ -1,0 +1,17 @@
+[package]
+name = "pubpki"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "I/O for fips-pub-pki: relays, issuer proofs and keys through pubdom-resolve, NIP-44"
+
+# Rule (docs/architecture.md): no cfg(target_os) here either; the phone
+# embeds this crate.
+[dependencies]
+pubpki-core.workspace = true
+pubdom-resolve.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
