@@ -482,9 +482,17 @@ mod tests {
             }),
             Some(NOW - 10)
         );
-        // An empty or old file is a default snapshot.
+        // An empty or old file is a default snapshot; a certificate written
+        // before `other_usages` and `digest` existed still loads.
         let empty: Snapshot = serde_json::from_str("{}").unwrap();
         assert_eq!(empty, Snapshot::default());
+        let k1 = key(1).to_string();
+        let old = format!(
+            r#"{{"issuers":[],"seen":[],"certs":[{{"issuer":"{k1}","name":{{"local":"alice","domain":"example.org"}},"subjects":["{k1}"],"expiration":1797776000,"usages":["sign"],"revoked":null,"pathlen":null,"relays":[],"created_at":1790000000}}]}}"#
+        );
+        let from_0_1: Snapshot = serde_json::from_str(&old).unwrap();
+        assert_eq!(from_0_1.certs.len(), 1);
+        assert!(from_0_1.certs[0].other_usages.is_empty() && from_0_1.certs[0].digest.is_none());
         let future: Snapshot =
             serde_json::from_str(r#"{"issuers":[],"seen":[],"later":1}"#).unwrap();
         assert_eq!(future, Snapshot::default());

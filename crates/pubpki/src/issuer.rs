@@ -155,9 +155,8 @@ pub struct Request {
     pub pathlen: Option<u32>,
     pub relays: Vec<String>,
     /// The event's content: empty, display fields, or the base64 DER of
-    /// an X.509 root (`usage x509`, with `digest` its SHA-256).
+    /// an X.509 root (`usage x509`); the `x` tag is computed from it.
     pub content: String,
-    pub digest: Option<[u8; 32]>,
 }
 
 impl Request {
@@ -170,7 +169,6 @@ impl Request {
             pathlen: None,
             relays: Vec::new(),
             content: String::new(),
-            digest: None,
         }
     }
 
@@ -182,9 +180,19 @@ impl Request {
         let mut req = Self::new(Name::x509(domain)?, nodes);
         req.usages = vec![Usage::X509];
         req.content = base64::engine::general_purpose::STANDARD.encode(der);
-        req.digest = Some(pubpki_core::sig::digest(der));
         Some(req)
     }
+}
+
+/// The `x` tag of a root statement: SHA-256 of the DER the content
+/// decodes to (the certificate's usual fingerprint), `None` when the
+/// content is not base64.
+pub fn root_digest(content: &str) -> Option<[u8; 32]> {
+    use base64::Engine;
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(content.trim())
+        .ok()?;
+    (!der.is_empty()).then(|| pubpki_core::sig::digest(&der))
 }
 
 /// An issuer: a key, and the domain it issues for.
@@ -255,11 +263,13 @@ impl Issuer {
                 req.name.domain
             ));
         }
-        if req.name.is_x509() && (req.digest.is_none() || req.content.is_empty()) {
-            return Err(
-                "the X.509 root statement needs the DER in the content and its digest".into(),
-            );
-        }
+        let digest = if req.name.is_x509() {
+            Some(root_digest(&req.content).ok_or_else(|| {
+                "the X.509 root statement needs the root's DER, base64, as content".to_string()
+            })?)
+        } else {
+            None
+        };
         if req.name.is_reserved() && !req.name.is_apex() && !req.name.is_x509() {
             return Err(format!(
                 "{}: local parts starting with _ are reserved for the domain's own statements",
@@ -282,7 +292,7 @@ impl Issuer {
             pathlen: req.pathlen,
             relays: req.relays.clone(),
             other_usages: Vec::new(),
-            digest: req.digest,
+            digest,
             created_at: now,
         };
         sign_at(&self.keys, KIND_CERT, cert.tags(), &req.content, now)
@@ -356,7 +366,8 @@ impl Issuer {
         let mut names = serde_json::Map::new();
         let mut relays = serde_json::Map::new();
         for (c, _) in issued.certificates() {
-            if c.name.domain != self.domain || c.name.is_apex() || !c.is_live_at(now) {
+            // Reserved names are the domain's statements, not people.
+            if c.name.domain != self.domain || c.name.is_reserved() || !c.is_live_at(now) {
                 continue;
             }
             let Some(key) = c.subjects.first() else {
@@ -580,6 +591,14 @@ mod tests {
         let mut no_der = req.clone();
         no_der.content.clear();
         assert!(issuer.issue(&no_der, now()).is_err());
+        let mut not_b64 = req.clone();
+        not_b64.content = "not base64!".into();
+        assert!(issuer.issue(&not_b64, now()).is_err());
+        assert_eq!(
+            root_digest(&req.content),
+            Some(pubpki_core::sig::digest(der)),
+            "the DER's hash, not the text's"
+        );
         let mut other_reserved = Request::new(Name::parse("_foo@example.org").unwrap(), vec![node]);
         other_reserved.validity_secs = 3600;
         assert!(issuer.issue(&other_reserved, now()).is_err(), "reserved");
@@ -635,8 +654,21 @@ mod tests {
             issued.get(&Name::parse("alice@example.org").unwrap()),
             Some(&renewed)
         );
+        issued.put(
+            issuer
+                .issue(
+                    &Request::x509_root("example.org", vec![bob], b"DER").unwrap(),
+                    now() - 10,
+                )
+                .unwrap(),
+        );
         let json = issuer.nostr_json(&issued, now());
         assert_eq!(json["names"]["alice"], alice.to_hex());
+        assert_eq!(
+            json["names"].get("_x509"),
+            None,
+            "a statement, not a person"
+        );
         assert_eq!(json["names"].get("bob"), None, "another domain");
         assert_eq!(json["names"].get("_"), None, "the apex is no name");
         assert_eq!(json["relays"][alice.to_hex()][0], "wss://r");

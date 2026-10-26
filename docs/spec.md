@@ -76,12 +76,17 @@ canonical. No `usage` tag at all means `sign` and `encrypt`; a value
 the client does not know is kept (`other_usages`) and counts as a usage,
 so a certificate whose usages are all unknown allows nothing
 (`allows`); `ca` and `x509` are never implied; `ca` only on an apex
-certificate makes a sub-issuer. The `x` tag is the SHA-256 of the
-event's content (`digest`), required with `usage x509`. Local parts
-starting with `_` are reserved (`Name::is_reserved`): `_` the apex,
-`_x509` the X.509 root statement (`Name::x509`); the issuer refuses any
-other (`Issuer::issue`). `Issuer::renew` and `revoke` take the event and
-carry its content, so a root statement keeps its DER through renewal.
+certificate makes a sub-issuer. The `x` tag is the SHA-256 of the DER
+the content decodes to (`digest`), required with `usage x509` and
+computed by the issuer from the content (`root_digest`); on any other
+certificate it is carried if well-formed and ignored otherwise. Local
+parts starting with `_` are reserved (`Name::is_reserved`): `_` the
+apex, `_x509` the X.509 root statement (`Name::x509`); the issuer refuses
+any other (`Issuer::issue`), `names_of` never lists a reserved name
+other than the apex among a key's names, `nostr_json` never emits one,
+and `encrypt` refuses one. `Issuer::renew` and `revoke` take the event
+and carry its content, so a root statement keeps its DER through
+renewal.
 
 ## 4. Path validation
 
@@ -225,10 +230,10 @@ recipient key.
 
 ## 8a. The X.509 bridge
 
-TLS for services on the overlay (docs/acme.md, in progress) needs an
+TLS for services on the overlay (the ACME server, roadmap.md) needs an
 X.509 root that clients can trust. The root is the domain's statement:
 a certificate for `_x509@<domain>`, `usage x509`, the root's DER base64
-in the content, its SHA-256 in `x`, the operating nodes as `p`
+in the content, the DER's SHA-256 in `x`, the operating nodes as `p`
 (`Request::x509_root`). It is validated like any certificate (§4); a
 client then checks the digest, parses the DER, requires a self-signed CA
 certificate, and exports the PEM. The X.509 key is separate from the

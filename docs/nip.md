@@ -96,12 +96,15 @@ Addressable; `d` is the name.
 - `content`: empty, or a JSON object with display fields (`name`,
   `about`, `picture`); for `usage` `x509`, the base64 DER below. Never a
   security input except through the `x` tag.
-- `x`: the SHA-256 of `content`, hex, REQUIRED with `usage` `x509`.
+- `x`: the SHA-256, hex, of the DER that `content` decodes to (the root
+  certificate's usual fingerprint), REQUIRED with `usage` `x509`.
 - **Reserved names.** A local part starting with `_` is a statement of
   the domain about itself, not a person: `_@<domain>` names the domain's
   own keys (its services) or, with `usage` `ca`, a sub-issuer for the
   domain; `_x509@<domain>` is its X.509 root statement. Issuers MUST NOT
-  issue other `_…` names; clients MUST NOT resolve them as people.
+  issue other `_…` names. A reserved name other than the apex is never a
+  person: clients MUST NOT list it among the names a key holds, nor
+  encrypt to it, nor present it as an identity.
 
 Clients query `{"kinds":[37200], "#d":["alice@example.org"]}` to go from
 name to key and `{"kinds":[37200], "#p":["<pubkey>"]}` to go from key to
@@ -131,19 +134,23 @@ many further sub-issuer certificates may follow below it (`0`: none).
 A domain that runs TLS services on the overlay publishes the root of
 its own X.509 CA as a certificate for `_x509@<domain>` with
 `["usage", "x509"]`, the base64 (RFC 4648) DER of the self-signed root
-certificate as `content`, and `["x", <sha256 of content, hex>]`. Its `p`
+certificate as `content`, and `["x", <sha256 of the DER, hex>]`. Its `p`
 keys are the nodes operating the CA (where its ACME endpoint listens).
 A client that validates this certificate's path as for any other has
-the domain's word that this X.509 root is the domain's: it checks the
-`x` tag against the content, parses the DER, requires a self-signed CA
-certificate, and may install it in a TLS trust store. How the CA issues
-TLS certificates is outside this NIP; the reference implementation runs
-an ACME server reachable over the overlay only.
+the domain's word that this X.509 root is the domain's: it decodes the
+content, checks its SHA-256 against the `x` tag, parses the DER,
+requires a self-signed CA certificate, and may install it in a TLS
+trust store. How the CA issues TLS certificates is outside this NIP; the
+reference implementation runs an ACME server reachable over the overlay
+only.
 
-A client of an earlier version meets this event as a certificate with
-one unknown usage for `_x509@<domain>`: by the rule above it allows
-nothing, and a reserved name is never resolved as a person, so the event
-is inert to it.
+Compatibility: a client written to this revision meets the event as a
+certificate with a usage it may not know, which allows nothing, under a
+reserved name, which is not a person; the event is inert to it. A client
+of the reference implementation's 0.1.0, which predates both rules,
+reads it as a plain sign+encrypt certificate for the operating node's
+key under the name `_x509@<domain>`; no such verifier was deployed, and
+the rules above exist so that it cannot happen again.
 
 ## Path validation
 

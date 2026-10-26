@@ -41,7 +41,7 @@ pub enum Usage {
     /// The certificate's content is an X.509 CA certificate (base64 DER)
     /// whose SHA-256 is the `x` tag; the subject keys are the nodes
     /// operating it (`d` must be `_x509@<domain>`). The TLS bridge
-    /// (docs/acme.md).
+    /// (docs/roadmap.md).
     X509,
 }
 
@@ -69,7 +69,7 @@ impl Usage {
 impl std::str::FromStr for Usage {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::parse(s).ok_or_else(|| format!("{s}: usage is sign, encrypt or ca"))
+        Self::parse(s).ok_or_else(|| format!("{s}: usage is sign, encrypt, ca or x509"))
     }
 }
 
@@ -94,9 +94,14 @@ pub struct Certificate {
     /// Usage values this client does not know, verbatim: they count as
     /// usages (the certificate allows nothing this client knows unless a
     /// known one is listed too) and are written back by [`Certificate::tags`].
+    /// Defaults when read from a file written before it existed.
+    #[serde(default)]
     pub other_usages: Vec<String>,
-    /// SHA-256 of the event's content (the `x` tag), required with
-    /// `usage x509`; what `fips-pubpki trust` checks the DER against.
+    /// The `x` tag: SHA-256 of the DER the content decodes to, required
+    /// with `usage x509` and checked by a client before it trusts the
+    /// root. Carried but meaningless on other certificates; a malformed
+    /// one is fatal only with `usage x509`.
+    #[serde(default)]
     pub digest: Option<[u8; 32]>,
     /// A revocation marker replacing the certificate, with its reason.
     pub revoked: Option<String>,
@@ -147,10 +152,7 @@ impl Certificate {
                 None => {}
             }
         }
-        let digest = match tag_value(&ev.tags, "x") {
-            Some(v) => Some(crate::sig::hex_digest(v).ok_or(CertError::Digest)?),
-            None => None,
-        };
+        let digest = tag_value(&ev.tags, "x").and_then(crate::sig::hex_digest);
         if usages.contains(&Usage::X509) && digest.is_none() {
             return Err(CertError::Digest);
         }
@@ -411,12 +413,19 @@ mod tests {
         let mut bad_x = ev.clone();
         bad_x.tags.iter_mut().find(|t| t[0] == "x").unwrap()[1] = "zz".into();
         assert_eq!(Certificate::parse(&bad_x), Err(CertError::Digest));
-        // The tag without the usage is carried but means nothing.
+        // The tag without the usage is carried but means nothing, and a
+        // malformed one is not fatal there: another extension's `x` must
+        // not cost alice her certificate.
         let mut plain = cert("alice@example.org", &[]);
         plain.digest = Some([9; 32]);
         let q = Certificate::parse(&event(&plain)).unwrap();
         assert_eq!(q.digest, Some([9; 32]));
         assert!(!q.is_x509());
+        let mut odd = event(&plain);
+        odd.tags.iter_mut().find(|t| t[0] == "x").unwrap()[1] = "not-hex".into();
+        let o = Certificate::parse(&odd).unwrap();
+        assert_eq!(o.digest, None);
+        assert!(o.allows(Usage::Sign));
         // x509 on another name is not the root statement.
         let mut elsewhere = cert("_@example.org", &[Usage::X509]);
         elsewhere.digest = Some([1; 32]);

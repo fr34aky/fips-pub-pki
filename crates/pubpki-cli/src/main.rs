@@ -352,6 +352,9 @@ async fn main() -> Result<()> {
                     bail!("{name}: not resolved to a key");
                 }
             };
+            if name.is_reserved() && !name.is_apex() {
+                bail!("{name}: a reserved name is the domain's statement, not someone to write to");
+            }
             if !path.cert().allows(Usage::Encrypt) {
                 bail!("{name}: the certificate does not allow encrypt");
             }
@@ -497,15 +500,15 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
                 // same file while the loop runs.
                 let mut issued = Issued::load(&cfg.ca_issued).map_err(anyhow::Error::msg)?;
                 let t = now();
-                let due: Vec<(Certificate, Event)> = issued
+                let due: Vec<Event> = issued
                     .certificates()
                     .into_iter()
-                    .map(|(c, ev)| (c, ev.clone()))
                     .filter(|(c, _)| c.revoked.is_none() && c.issuer == issuer.npub())
                     .filter(|(c, _)| match &only {
                         Some(n) => &c.name == n,
                         None => force || renewable(c, t),
                     })
+                    .map(|(_, ev)| ev.clone())
                     .collect();
                 if let Some(n) = &only
                     && due.is_empty()
@@ -513,7 +516,7 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
                     bail!("{n}: nothing live to renew");
                 }
                 let mut events = Vec::new();
-                for (_, ev) in &due {
+                for ev in &due {
                     events.push(issuer.renew(ev, t).map_err(anyhow::Error::msg)?);
                 }
                 let r = if !events.is_empty() {
@@ -700,7 +703,7 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
                 } else {
                     "live"
                 };
-                let usages: Vec<String> = c.usages.iter().map(|u| u.to_string()).collect();
+                let usages = usages_of(&c);
                 println!(
                     "  {:<40} {:<16} expires {:>8}  {} key(s) {}{}",
                     c.name.to_string(),
@@ -718,6 +721,16 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Every usage, the unknown ones included, so an operator sees why a
+/// certificate allows nothing.
+fn usages_of(c: &Certificate) -> Vec<String> {
+    c.usages
+        .iter()
+        .map(|u| u.to_string())
+        .chain(c.other_usages.iter().cloned())
+        .collect()
 }
 
 fn halfway(c: &Certificate) -> u64 {
@@ -989,7 +1002,7 @@ fn print_resolution(name: &Name, r: &Resolution, json: bool) -> Result<()> {
 fn print_path(p: &CertPath) {
     let t = now();
     for (i, c) in p.certs.iter().enumerate() {
-        let usages: Vec<String> = c.usages.iter().map(|u| u.to_string()).collect();
+        let usages = usages_of(c);
         println!(
             "  {}{} by {}  expires in {}{}",
             "  ".repeat(i),
