@@ -28,6 +28,15 @@ signature = "2"
 rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast"] }
 num-bigint-dig = { version = "0.8", default-features = false }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "time", "sync", "macros"] }
+http = "1"
+bytes = "1"
+socket2 = "0.6"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
+# A real ACME client against the server on loopback; `ring` keeps aws-lc
+# out, plain HTTP through `builder_with_http` keeps TLS out.
+instant-acme = { version = "0.8.5", default-features = false, features = ["ring"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }

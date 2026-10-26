@@ -45,7 +45,7 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
    identifier policy, the X.509 root and issuing, the zone reader, the
    state store — **done**; (3) the ACME server listening on the CA node's fips
    address, the mesh connection as the proof, an integration test with
-   a real ACME client on loopback; (4) `fips-pubpki acme init|serve|
+   a real ACME client on loopback — **done**; (4) `fips-pubpki acme init|serve|
    allow|deny|list|status`, `fips-pubpki trust`, the unit, `docs/acme.md`
    and the other guides.
 

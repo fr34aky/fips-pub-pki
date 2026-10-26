@@ -8,12 +8,13 @@
 //! Policy modules take no I/O and are table-tested: [`jws`] (the
 //! request signature), [`policy`] (allowlist, peer, identifiers, order
 //! state), [`nonce`], [`x509`] (root, CSR, issuing, root check). [`zone`]
-//! reads the name → key binding, [`store`] the state directory. The
-//! HTTP server itself is `server` (next PR).
+//! reads the name → key binding, [`store`] the state directory, and
+//! [`server`] is the HTTP side over all of them.
 
 pub mod jws;
 pub mod nonce;
 pub mod policy;
+pub mod server;
 pub mod store;
 pub mod x509;
 pub mod zone;

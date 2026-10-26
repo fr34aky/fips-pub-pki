@@ -9,13 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `pubpki_acme::server`: the ACME server (RFC 8555) over the crate's
+  policy — one listener on the CA node's fips address (bound to the
+  interface on Linux), the peer's source address as the proof, an
+  allowlist reloaded without a restart, authorizations valid at birth,
+  CSR inspection and issuing at finalize, PEM chains, revocation; driven
+  end to end by a real ACME client (instant-acme) in the test suite.
 - The `pubpki-acme` crate (desktop only): the policy and crypto of the
-  ACME server to come — the flattened-JWS verifier (ES256, RS256,
+  ACME server — the flattened-JWS verifier (ES256, RS256,
   EdDSA, RFC 7638 thumbprints), the allowlist and the peer-address
   table, identifier approval against the domain's zone record, the
   order, account and revocation rules, the nonce pool, the P-256 root
   and leaf issuing with rcgen, the root check for `trust`, the zone-file
-  reader and relay fetch, the state directory. No sockets yet.
+  reader and relay fetch, the state directory.
 - Protocol: `usage x509` and the `x` tag (the content's SHA-256) for the
   domain's X.509 root statement under the reserved name
   `_x509@<domain>`; local parts starting with `_` are reserved
