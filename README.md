@@ -22,8 +22,11 @@ on the mesh.
   department's key, needs no DNS change.
 - **Revocation is short validity plus an explicit marker**, both
   addressable events; nothing depends on a relay honouring a deletion.
-- **No X.509, no web PKI.** Signatures are event signatures (never raw
-  bytes), encryption is NIP-44.
+- **X.509 only as the TLS bridge.** Identity is event signatures (never
+  raw bytes) and NIP-44; for `https://` on the mesh the domain's CA runs
+  an ACME server on its node's fips address, the connection being the
+  proof, and publishes its X.509 root through the PKI
+  ([docs/acme.md](docs/acme.md)).
 
 Not a goal: a global registry of names, TLS certificates, or long-term
 validation after expiry.
@@ -46,7 +49,8 @@ submission ([docs/roadmap.md](docs/roadmap.md)).
 |---|---|---|
 | `pubpki-core` | everywhere (no I/O) | names, certificates, sub-issuer scope, path validation, revocation, anti-rollback, the bundle format |
 | `pubpki` | desktop and phone | relays, issuer proofs and keys through `pubdom-resolve`; NIP-44 |
-| `pubpki-cli` → `fips-pubpki` | desktop | `ca init\|issue\|issue-ca\|renew\|revoke\|publish\|status`, `resolve`, `verify`, `sign`, `verify-sig`, `encrypt`, `decrypt`, `bundle`, `nostr-json` |
+| `pubpki-acme` | desktop | the ACME server: JWS, allowlist and identifier policy, X.509 root and leaves, the zone, the endpoints |
+| `pubpki-cli` → `fips-pubpki` | desktop | `ca init\|issue\|issue-ca\|renew\|revoke\|publish\|status`, `acme init\|serve\|allow\|deny\|list\|status`, `resolve`, `verify`, `trust`, `sign`, `verify-sig`, `encrypt`, `decrypt`, `bundle`, `nostr-json` |
 
 ## Quick start
 
@@ -76,6 +80,8 @@ fips-pubpki --config user.yaml verify alice.json           # the event from issu
   claim, issuing, sub-issuers, renewal, revocation, witnesses.
 - [docs/users.md](docs/users.md) — resolving, pins, offline bundles,
   signing, encrypting, the file, troubleshooting.
+- [docs/acme.md](docs/acme.md) — TLS certificates for services on the
+  mesh: the ACME server, the clients, trusting the root.
 - [docs/nip.md](docs/nip.md) — the protocol as a NIP draft.
 - [docs/spec.md](docs/spec.md) — the protocol as this implementation
   applies it: precedence, path validation, storage, the bundle.

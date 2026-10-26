@@ -40,6 +40,9 @@ Where things go, either role:
 | the issuer key | `/etc/fips-pubpki/ca.key` (`ca init` writes it, mode 0600) |
 | what the issuer has issued | `/var/lib/fips-pubpki/issued.json` |
 | the renewal unit | `/etc/systemd/system/fips-pubpki-ca.service` |
+| the X.509 root (TLS on the mesh, [acme.md](acme.md)) | `/etc/fips-pubpki/x509-root.key` (`acme init`, mode 0600) and `x509-root.crt` |
+| the ACME state: allowlist, accounts, issued chains | `/var/lib/fips-pubpki/acme/` |
+| the ACME unit | `/etc/systemd/system/fips-pubpki-acme.service` |
 
 ## The issuer
 
@@ -99,14 +102,29 @@ revoke by hand with `sudo -g fips-pubpki fips-pubpki ca issue …` or as
 root; the loop picks the new certificates up at its next check (within
 an hour at most; `systemctl restart fips-pubpki-ca` makes it now).
 
+TLS certificates for the domain's services (optional,
+[acme.md](acme.md)): the ACME server runs as a second unit on the same
+node.
+
+```bash
+sudo install -m 0644 packaging/systemd/fips-pubpki-acme.service /etc/systemd/system/
+sudo fips-pubpki acme init --node npub1…        # the node's key; writes the root, publishes the statement
+sudo chgrp fips-pubpki /etc/fips-pubpki/x509-root.key && sudo chmod 0640 /etc/fips-pubpki/x509-root.key
+sudo fips-pubpki acme allow npub1…              # each node that may ask
+sudo systemctl daemon-reload
+sudo systemctl enable --now fips-pubpki-acme.service
+```
+
 ### Upgrade
 
 ```bash
 cd fips-pub-pki && git pull && cargo build --release
 sudo install -m 0755 target/release/fips-pubpki /usr/bin/
 sudo install -m 0644 packaging/systemd/fips-pubpki-ca.service /etc/systemd/system/
+sudo install -m 0644 packaging/systemd/fips-pubpki-acme.service /etc/systemd/system/   # if you run it
 sudo systemctl daemon-reload
 sudo systemctl restart fips-pubpki-ca.service
+sudo systemctl try-restart fips-pubpki-acme.service
 fips-pubpki --version
 ```
 
@@ -118,8 +136,8 @@ mean a default), and the [CHANGELOG](../CHANGELOG.md) names any new key.
 ### Uninstall
 
 ```bash
-sudo systemctl disable --now fips-pubpki-ca.service
-sudo rm /etc/systemd/system/fips-pubpki-ca.service /usr/bin/fips-pubpki
+sudo systemctl disable --now fips-pubpki-ca.service fips-pubpki-acme.service
+sudo rm -f /etc/systemd/system/fips-pubpki-ca.service /etc/systemd/system/fips-pubpki-acme.service /usr/bin/fips-pubpki
 sudo systemctl daemon-reload
 # the key and what was issued: keep them unless the issuer is retired for good
 # sudo rm -r /etc/fips-pubpki /var/lib/fips-pubpki
@@ -161,6 +179,7 @@ an `nsec` or key file of their own. Then:
 fips-pubpki resolve alice@example.org
 fips-pubpki issuer add npub1….fips npub1…     # trust a bare-key issuer a friend gave you
 fips-pubpki verify bundle.json                 # with no network at all
+fips-pubpki trust example.org -o example.crt   # the domain's TLS root, for the trust store
 ```
 
 [users.md](users.md) has every command.

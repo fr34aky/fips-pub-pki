@@ -1,0 +1,25 @@
+[Unit]
+Description=fips-pubpki ACME server: TLS certificates for services on the mesh, on the node's fips address
+Documentation=https://github.com/fr34aky/fips-pub-pki
+After=network-online.target fips.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Not root: a throwaway user in group fips-pubpki, which reads the issuer
+# key and the X.509 root key (0640) and owns the state directory.
+DynamicUser=yes
+SupplementaryGroups=fips-pubpki
+StateDirectory=fips-pubpki fips-pubpki/acme
+ConfigurationDirectory=fips-pubpki
+ExecStart=/usr/bin/fips-pubpki --config /etc/fips-pubpki/config.yaml acme serve
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target

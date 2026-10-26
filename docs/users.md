@@ -138,6 +138,19 @@ once resolves offline, and a revocation seen once stays seen). Strangers'
 events are answered and forgotten at exit; the file grows only with
 issuers you placed. It is plain JSON; edit it only to remove.
 
+## The domain's TLS root
+
+```bash
+fips-pubpki trust example.org -o example.crt
+fips-pubpki trust example.org --bundle statement.json -o example.crt   # offline
+```
+
+Resolves the domain's `_x509@example.org` statement like any name,
+checks the X.509 root inside it (digest, self-signed CA, unexpired) and
+writes the PEM to install in your trust store, so that
+`https://relay.example.org` and `https://<npub>.fips` on the mesh are
+accepted. [acme.md](acme.md) has the installation per platform.
+
 ## Troubleshooting
 
 - **`no certificate found` for a name you know exists**: your relays do

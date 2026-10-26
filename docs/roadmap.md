@@ -46,8 +46,10 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
    state store — **done**; (3) the ACME server listening on the CA node's fips
    address, the mesh connection as the proof, an integration test with
    a real ACME client on loopback — **done**; (4) `fips-pubpki acme init|serve|
-   allow|deny|list|status`, `fips-pubpki trust`, the unit, `docs/acme.md`
-   and the other guides.
+   allow|deny|list|status`, `fips-pubpki trust [--bundle]`, the unit,
+   `docs/acme.md` and the other guides — **done**. Live, on the user's
+   word: `acme init` on the CA node, a second node with certbot against
+   the directory over the mesh, `trust` on a third, a browser.
 
 1. **Live** (each on the user's word): a `_fips-ca` record for the demo
    domain and an issuer claim with its chain; certificates on the mesh

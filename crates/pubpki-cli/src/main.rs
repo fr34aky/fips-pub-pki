@@ -15,6 +15,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod acme;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "fips-pubpki",
@@ -86,6 +88,20 @@ enum Cmd {
     },
     /// Print the effective configuration
     Config,
+    /// TLS certificates for services on the mesh: the ACME server
+    Acme {
+        #[command(subcommand)]
+        cmd: acme::AcmeCmd,
+    },
+    /// Fetch and check a domain's published X.509 root; write the PEM to install
+    Trust {
+        domain: String,
+        /// The statement's event (or a bundle) from a file instead of the relays
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -183,6 +199,12 @@ async fn main() -> Result<()> {
     let cfg = Config::load_or_default(&cli.config).map_err(anyhow::Error::msg)?;
     match cli.cmd {
         Cmd::Config => print!("{}", cfg.render().map_err(anyhow::Error::msg)?),
+        Cmd::Acme { cmd } => acme::run(cmd, &cfg, cli.json).await?,
+        Cmd::Trust {
+            domain,
+            bundle,
+            out,
+        } => acme::trust(&cfg, &domain, bundle.as_deref(), out.as_deref(), cli.json).await?,
         Cmd::Ca { cmd } => ca(cmd, &cfg, cli.json).await?,
         Cmd::Issuer { cmd } => {
             let mut v = Verifier::open(cfg.clone())
@@ -391,7 +413,7 @@ async fn main() -> Result<()> {
 /// answer is printed (a closed pipe must not cost what was learnt). A
 /// file that cannot be written (a plain user with the system default
 /// path) is a warning, not a lost answer.
-async fn finish(mut v: Verifier) {
+pub(crate) async fn finish(mut v: Verifier) {
     if let Err(e) = v.save(now()) {
         eprintln!("warning: not saved: {e} (set `issuers:` to a writable path)");
     }
@@ -750,7 +772,7 @@ fn renewable(c: &Certificate, now: u64) -> bool {
     is_due(c, now) || (now >= c.expiration && now < c.expiration + length)
 }
 
-fn in_days(at: u64, now: u64) -> String {
+pub(crate) fn in_days(at: u64, now: u64) -> String {
     if at <= now {
         return "past".into();
     }
@@ -762,7 +784,7 @@ fn in_days(at: u64, now: u64) -> String {
     }
 }
 
-fn open_issuer(cfg: &Config) -> Result<(Issuer, Issued)> {
+pub(crate) fn open_issuer(cfg: &Config) -> Result<(Issuer, Issued)> {
     let keys = load_keys(&cfg.ca_key.display().to_string())
         .map_err(|e| anyhow!("{e}; `fips-pubpki ca init` creates the key"))?;
     let issuer = Issuer::new(keys, cfg.ca_domain.as_deref()).map_err(anyhow::Error::msg)?;
@@ -772,7 +794,7 @@ fn open_issuer(cfg: &Config) -> Result<(Issuer, Issued)> {
 
 /// Record the events (refusing one the file would not take), save, print,
 /// publish what is pending.
-async fn record_and_publish(
+pub(crate) async fn record_and_publish(
     cfg: &Config,
     issued: &mut Issued,
     events: &[Event],
@@ -894,7 +916,7 @@ fn user_keys(cfg: &Config) -> Result<Keys> {
 
 /// The key file is created with its final mode: never readable by others,
 /// not even for an instant.
-fn write_secret(path: &std::path::Path, keys: &Keys) -> Result<()> {
+pub(crate) fn write_secret(path: &std::path::Path, keys: &Keys) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| dir.display().to_string())?;
     }
@@ -917,7 +939,7 @@ fn parse_name(s: &str) -> Result<Name> {
     Name::parse(s).ok_or_else(|| anyhow!("{s}: not a name (local@domain, _@domain for the domain)"))
 }
 
-fn parse_npub(s: &str) -> Result<Npub> {
+pub(crate) fn parse_npub(s: &str) -> Result<Npub> {
     Npub::parse_any(s).map_err(|e| anyhow!("{s}: {e}"))
 }
 
@@ -925,7 +947,7 @@ fn parse_npubs(v: &[String]) -> Result<Vec<Npub>> {
     v.iter().map(|s| parse_npub(s)).collect()
 }
 
-fn read_events(text: &str) -> Result<Vec<Event>> {
+pub(crate) fn read_events(text: &str) -> Result<Vec<Event>> {
     if text.trim_start().starts_with('[') {
         return pubpki::bundle::parse(text).map_err(anyhow::Error::msg);
     }
@@ -945,7 +967,7 @@ fn read_in(file: Option<&std::path::Path>) -> Result<Vec<u8>> {
     }
 }
 
-fn write_out(out: Option<&std::path::Path>, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_out(out: Option<&std::path::Path>, bytes: &[u8]) -> Result<()> {
     match out {
         Some(p) => std::fs::write(p, bytes).with_context(|| p.display().to_string()),
         None => {
@@ -956,7 +978,7 @@ fn write_out(out: Option<&std::path::Path>, bytes: &[u8]) -> Result<()> {
     }
 }
 
-fn print_resolution(name: &Name, r: &Resolution, json: bool) -> Result<()> {
+pub(crate) fn print_resolution(name: &Name, r: &Resolution, json: bool) -> Result<()> {
     if json {
         let v = match r {
             Resolution::Verified(p) => serde_json::json!({ "status": "verified", "path": p }),
@@ -999,7 +1021,7 @@ fn print_resolution(name: &Name, r: &Resolution, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn print_path(p: &CertPath) {
+pub(crate) fn print_path(p: &CertPath) {
     let t = now();
     for (i, c) in p.certs.iter().enumerate() {
         let usages = usages_of(c);

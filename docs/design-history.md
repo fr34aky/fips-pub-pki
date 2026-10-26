@@ -51,3 +51,61 @@ whether to build it into fips-pub-domains or beside it.
   as a security input; NIP-85 maybe mirrored later.
 - **No X.509 bridge.** fips authenticates the far key; browsers' trust
   stores are a different problem. Revisit only with a concrete need.
+
+## TLS on the mesh through ACME (2026-10-26)
+
+The request: a web server or relay on a fips node should get a TLS
+certificate for its service from the domain's CA with an ordinary ACME
+client, the certificate naming both the human-readable name and the
+node's `<npub>.fips`, and only nodes the CA knows should be able to ask.
+The PKI so far had scoped X.509 out; browsers made it necessary.
+
+**No challenge round.** On fips a packet from `fd…` can only come from
+the node holding the key the address is derived from: the mesh
+authenticates the source cryptographically. An HTTP-01 or DNS-01 round
+would therefore prove less than the transport already proves, and the
+operator's allowlist plus the zone's binding of the name to the node is
+the actual authorization. The ACME server listens on the CA node's fips
+address only and, on Linux, on the fips interface only; the peer's
+address names the requester; authorizations are valid at birth, which
+RFC 8555 permits and every targeted client handles. Rejected: External
+Account Binding (a shared secret duplicating the allowlist, and a
+weaker binding than the key); a custom `fips-01` challenge type (every
+client would need a plugin for nothing new); HTTPS on the ACME endpoint
+(nothing to authenticate it with before the root exists; the mesh
+encrypts the hop). The premise, and its limit, are written down: the
+listener must never be reachable through another interface or a proxy.
+
+**A P-256 root, separate from the issuer key.** Browsers and TLS stacks
+do not accept secp256k1 or Schnorr; the Nostr issuer key signs events,
+the X.509 key signs certificates, and compromise of one does not cost
+the other. Rejected: deriving one key from the other (couples what
+should stay apart); an RSA root (size, on a mesh with small MTUs).
+Leaves are short-lived (30 days) and clients renew; no CRL, no OCSP:
+revocation infrastructure for certificates that die in a month is
+weight without benefit.
+
+**The root published through the PKI, under a reserved name.** "Is this
+the root of `example.org`" is the question NIP-DC already answers for
+keys, so the root's DER rides in a certificate for `_x509@<domain>`
+with `usage x509` and its SHA-256 in an `x` tag; `fips-pubpki trust` is
+path validation plus a hash check. The name is reserved rather than the
+apex `_@<domain>` because relays keep one event per issuer and name,
+and the apex already carries the domain's service keys and delegations;
+an `x509` statement there would have replaced them or been replaced by
+the next renewal. Rejected: shipping the root over HTTP from the ACME
+server (nothing authenticates it); a new event kind (one more thing to
+fetch, pin and register); putting the root in the zone record
+(fips-pub-domains's concern is names, not keys). Two rules came with
+it: local parts starting with `_` are the domain's statements, never
+people, and a usage a client does not know allows nothing; the
+compatibility note in nip.md says what 0.1.0 would have done instead.
+
+**What the first offline run changed.** nostr-sdk's builder drops a
+`p` tag naming the author unless told otherwise, which silently broke a
+bare key certifying its own name; a revocation marker arrives in a
+bundle that fails validation, so learning only from validated bundles
+left the old certificate verifiable; a verifier that kept floors but no
+certificates could not encrypt to a name it had just verified after a
+restart. All three are in the code now because the tool was run, not
+because they were foreseen.

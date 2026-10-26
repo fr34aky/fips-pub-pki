@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `fips-pubpki acme init|serve|allow|deny|list|status` and `fips-pubpki
+  trust <domain> [--bundle FILE] [-o FILE]`; the configuration keys
+  `acme_node`, `acme_port`, `acme_listen`, `acme_peer_override`,
+  `acme_interface`, `acme_state`, `acme_root_key`, `acme_root_cert`,
+  `acme_validity_days`, `acme_root_validity_days`, `acme_zone_file`,
+  `acme_zone_author`, `acme_zone_servers`, `acme_zone_ttl_secs`;
+  `packaging/systemd/fips-pubpki-acme.service`; `docs/acme.md` and the
+  TLS sections of the other guides.
 - `pubpki_acme::server`: the ACME server (RFC 8555) over the crate's
   policy — one listener on the CA node's fips address (bound to the
   interface on Linux), the peer's source address as the proof, an
