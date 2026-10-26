@@ -36,6 +36,27 @@ I/O through `pubdom-resolve`, in modules:
 never queries DNS; `TxtVerifier::lookup_service` and `build_chain_for`
 are for the issuer tooling (the `ca` commands), which comes next.
 
+### pubpki-acme
+
+Desktop only, outside the portability checks: the ACME server for TLS
+certificates on the mesh (spec §8a, docs/acme.md when it lands). The
+policy's premise is that a `fd…` source address was authenticated by the
+mesh; that holds only for connections that arrived over the fips
+interface, so the server (next PR) binds the node's fips address and,
+on Linux, the interface itself, and the service is never to sit behind
+a proxy or a host route from another interface.
+
+| module | what |
+|---|---|
+| `lib` | the limits, `Problem` (RFC 7807 with `urn:ietf:params:acme:error:*`), `Identifier`, `rfc3339` |
+| `jws` | the request signature: flattened JWS, `Jwk`, `Protected`, `parse`, `verify` (ES256, RS256, EdDSA), `thumbprint` (RFC 7638), `payload_json` — no I/O |
+| `policy` | `Allowlist` and its address table, `peer_of` (the mesh address is the proof; a loopback override for tests only), `approve` (the peer's `.fips` name and zone-mapped names under the CA's domain, all or nothing), `Order`/`Authz`/`Account`/`CertEntry`, `csr_matches`, `same_peer`, `may_revoke` — no I/O, table-tested |
+| `nonce` | `NoncePool`: single use, TTL, cap |
+| `x509` | `Root` (P-256, generate/load), `inspect_csr` (rcgen: signature verified, only SAN/KU/EKU/BC extensions, key algorithm and RSA size), `issue` (the order's names, serverAuth, AKI, short validity), `check_root_content` and `pem_of` for `trust` |
+| `zone` | `parse_zone_file` (the pubdom-server format), `ZoneSource::{File, Relays, None}`, `ZoneCache` |
+| `store` | `AcmeStore`: `allow.json`, `accounts.json`, `orders.json` (expired dropped), `certs/index.json`, `certs/<serial>.pem`, through `write_atomic` |
+| *(next)* `server` | the axum router and handlers, the peer extractor, the headers |
+
 ### pubpki-cli
 
 `fips-pubpki`, one file over `pubpki`: `ca init|issue|issue-ca|renew

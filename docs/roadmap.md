@@ -43,7 +43,7 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
    `x` tag, the reserved name `_x509@<domain>`, the unknown-usage rule
    — **done**; (2) the `pubpki-acme` crate: JWS, allowlist and
    identifier policy, the X.509 root and issuing, the zone reader, the
-   state store; (3) the ACME server listening on the CA node's fips
+   state store — **done**; (3) the ACME server listening on the CA node's fips
    address, the mesh connection as the proof, an integration test with
    a real ACME client on loopback; (4) `fips-pubpki acme init|serve|
    allow|deny|list|status`, `fips-pubpki trust`, the unit, `docs/acme.md`
@@ -59,6 +59,12 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
    on the user's word, after the reference implementation.
 
 ## Later
+
+- **One zone-file parser.** `pubpki_acme::zone::parse_zone_file` mirrors
+  fips-pubdom-server's private parser; a change there (a new target
+  form, a new key) would make the two disagree. The parser belongs in
+  `pubdom-core` as a PR to fips-pub-domains, with the server calling it
+  and the pin bumped here, when fips-pub-domains next changes.
 
 - **Enrolment requests** (ACME's model, over Nostr and fips only): a
   signed request event from the subject — proof of key possession, as

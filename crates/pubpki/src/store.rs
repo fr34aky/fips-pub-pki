@@ -47,13 +47,17 @@ impl FileStore {
 }
 
 /// Write `bytes` to `path` through a temp file and a rename, creating the
-/// directory; a crash leaves the old file or none, never a torn one.
-/// Callers that may write concurrently serialize themselves.
+/// directory; a crash leaves the old file or none, never a torn one. The
+/// temp name is unique per call, so two writers of one path cannot
+/// truncate each other's temp file; which content lands last is still
+/// the callers' to serialize (a load-modify-save needs one lock).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("{}.{n}.tmp", std::process::id()));
     let result = std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
