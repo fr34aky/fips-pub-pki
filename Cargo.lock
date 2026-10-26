@@ -2038,6 +2038,7 @@ dependencies = [
  "thiserror 2.0.21",
  "time",
  "tokio",
+ "tower",
  "tracing",
  "x509-parser",
 ]

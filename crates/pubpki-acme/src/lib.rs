@@ -38,6 +38,12 @@ pub const MIN_RSA_BITS: usize = 2048;
 pub const NOT_BEFORE_SKEW_SECS: u64 = 300;
 /// A root DER larger than this is refused by `check_root_content`.
 pub const MAX_ROOT_DER: usize = 8 * 1024;
+/// Live orders one account may hold; past it, `rateLimited`.
+pub const MAX_ORDERS_PER_ACCOUNT: usize = 16;
+/// HTTP deadlines: the request head, the body, a whole connection.
+pub const HEADER_TIMEOUT_SECS: u64 = 10;
+pub const BODY_TIMEOUT_SECS: u64 = 15;
+pub const CONNECTION_TIMEOUT_SECS: u64 = 120;
 
 /// RFC 8555 §6.7 error types, as `urn:ietf:params:acme:error:<type>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -52,6 +58,7 @@ pub enum ErrorType {
     BadSignatureAlgorithm,
     Malformed,
     OrderNotReady,
+    RateLimited,
     RejectedIdentifier,
     ServerInternal,
     Unauthorized,
@@ -71,6 +78,7 @@ impl ErrorType {
             Self::BadSignatureAlgorithm => "badSignatureAlgorithm",
             Self::Malformed => "malformed",
             Self::OrderNotReady => "orderNotReady",
+            Self::RateLimited => "rateLimited",
             Self::RejectedIdentifier => "rejectedIdentifier",
             Self::ServerInternal => "serverInternal",
             Self::Unauthorized => "unauthorized",
@@ -84,6 +92,7 @@ impl ErrorType {
     pub fn status(self) -> u16 {
         match self {
             Self::Unauthorized | Self::RejectedIdentifier | Self::OrderNotReady => 403,
+            Self::RateLimited => 429,
             Self::ServerInternal => 500,
             _ => 400,
         }

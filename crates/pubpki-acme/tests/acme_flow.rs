@@ -46,11 +46,19 @@ fn client() -> Box<dyn HttpClient> {
 
 struct Harness {
     base: String,
-    dir: std::path::PathBuf,
     _shutdown: tokio::sync::oneshot::Sender<()>,
 }
 
-async fn start(dir: &std::path::Path, root: &Root, peer: Option<Npub>) -> Harness {
+/// The scratch directory, removed however the test ends.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+async fn start(dir: &std::path::Path, peer: Option<Npub>) -> Harness {
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let listen: SocketAddr = "[::1]:0".parse().unwrap();
     let mut cfg = ServeConfig::new(listen, "example.org");
@@ -59,11 +67,8 @@ async fn start(dir: &std::path::Path, root: &Root, peer: Option<Npub>) -> Harnes
     let addr = listener.local_addr().unwrap();
     cfg.listen = addr;
     cfg.base_url = format!("http://{addr}");
-    let (_, key_pem, cert_pem) = (
-        root,
-        std::fs::read_to_string(dir.join("root.key")).unwrap(),
-        std::fs::read_to_string(dir.join("root.crt")).unwrap(),
-    );
+    let key_pem = std::fs::read_to_string(dir.join("root.key")).unwrap();
+    let cert_pem = std::fs::read_to_string(dir.join("root.crt")).unwrap();
     let root = Root::load(&key_pem, &cert_pem).unwrap();
     let store = AcmeStore::new(dir.join("acme"));
     let zone = ZoneCache::new(
@@ -79,12 +84,11 @@ async fn start(dir: &std::path::Path, root: &Root, peer: Option<Npub>) -> Harnes
     }));
     Harness {
         base: cfg.base_url,
-        dir: dir.to_path_buf(),
         _shutdown: tx,
     }
 }
 
-fn setup() -> (std::path::PathBuf, Root, Npub, Npub) {
+fn setup() -> (Scratch, Root, Npub, Npub) {
     let dir = std::env::temp_dir().join(format!(
         "pubpki-acme-flow-{}-{}",
         std::process::id(),
@@ -108,7 +112,7 @@ fn setup() -> (std::path::PathBuf, Root, Npub, Npub) {
         format!("domain: example.org\nnames:\n  \"@\": self\n  www: {peer}\n  mail: {other}\n  \"*\": legacy\n"),
     )
     .unwrap();
-    (dir, root, peer, other)
+    (Scratch(dir), root, peer, other)
 }
 
 fn rand_suffix() -> String {
@@ -180,8 +184,9 @@ fn problem_type(e: &instant_acme::Error) -> String {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_real_acme_client_gets_a_certificate_and_revokes_it() {
-    let (dir, root, peer, other) = setup();
-    let h = start(&dir, &root, Some(peer)).await;
+    let (scratch, root, peer, other) = setup();
+    let dir = scratch.0.clone();
+    let h = start(&dir, Some(peer)).await;
     let directory = format!("{}/directory", h.base);
 
     // 1. Account.
@@ -302,7 +307,7 @@ async fn a_real_acme_client_gets_a_certificate_and_revokes_it() {
     // 6. The same state after a restart: the account persists, nonces do not.
     let old_base = h.base.clone();
     drop(h);
-    let h2 = start(&dir, &root, Some(peer)).await;
+    let h2 = start(&dir, Some(peer)).await;
     let creds_json = serde_json::to_string(&creds).unwrap();
     // The directory moved with the port; point the credentials at it.
     let mut v: serde_json::Value = serde_json::from_str(&creds_json).unwrap();
@@ -313,12 +318,12 @@ async fn a_real_acme_client_gets_a_certificate_and_revokes_it() {
         .from_credentials(creds)
         .await
         .unwrap();
-    let o4 = account2.new_order(&NewOrder::new(&ids)).await.unwrap();
-    let _ = o4;
+    let mut o4 = account2.new_order(&NewOrder::new(&ids)).await.unwrap();
+    assert_eq!(o4.state().status, OrderStatus::Ready);
 
     // 7. Nobody allowed on this listener: no account, no nonce.
     drop(h2);
-    let h3 = start(&dir, &root, None).await;
+    let h3 = start(&dir, None).await;
     let e = err(Account::builder_with_http(client())
         .create(
             &NewAccount {
@@ -331,5 +336,29 @@ async fn a_real_acme_client_gets_a_certificate_and_revokes_it() {
         )
         .await);
     assert!(problem_type(&e).ends_with("unauthorized"), "{e}");
-    let _ = std::fs::remove_dir_all(&h3.dir);
+    drop(h3);
+    // 8. An account may hold only so many live orders.
+    let h4 = start(&dir, Some(peer)).await;
+    let mut v: serde_json::Value = serde_json::from_str(&creds_json).unwrap();
+    v["directory"] = serde_json::json!(format!("{}/directory", h4.base));
+    v["id"] = serde_json::json!(account.id().replace(&old_base, &h4.base));
+    let creds: instant_acme::AccountCredentials = serde_json::from_value(v).unwrap();
+    let account4 = Account::builder_with_http(client())
+        .from_credentials(creds)
+        .await
+        .unwrap();
+    let mut made = 0;
+    let mut limited = false;
+    for _ in 0..40 {
+        match account4.new_order(&NewOrder::new(&ids)).await {
+            Ok(_) => made += 1,
+            Err(e) => {
+                assert!(problem_type(&e).ends_with("rateLimited"), "{e}");
+                limited = true;
+                break;
+            }
+        }
+    }
+    assert!(limited, "{made} orders without a limit");
+    assert!(made <= 16);
 }

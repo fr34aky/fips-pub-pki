@@ -33,6 +33,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "time",
 http = "1"
 bytes = "1"
 socket2 = "0.6"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["server-auto", "tokio", "http1", "service"] }
+tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
 # A real ACME client against the server on loopback; `ring` keeps aws-lc

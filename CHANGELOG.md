@@ -13,8 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy — one listener on the CA node's fips address (bound to the
   interface on Linux), the peer's source address as the proof, an
   allowlist reloaded without a restart, authorizations valid at birth,
-  CSR inspection and issuing at finalize, PEM chains, revocation; driven
-  end to end by a real ACME client (instant-acme) in the test suite.
+  CSR inspection and issuing at finalize, PEM chains, revocation,
+  deadlines on the request head, the body and the connection, at most
+  16 live orders per account; driven end to end by a real ACME client
+  (instant-acme) in the test suite.
 - The `pubpki-acme` crate (desktop only): the policy and crypto of the
   ACME server — the flattened-JWS verifier (ES256, RS256,
   EdDSA, RFC 7638 thumbprints), the allowlist and the peer-address

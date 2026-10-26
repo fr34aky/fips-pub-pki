@@ -1,7 +1,8 @@
 //! The ACME endpoints (RFC 8555 §7) over the policy modules. One
 //! listener on the CA node's fips address, one lock over the live
-//! tables, the peer's source address as the proof, files saved from
-//! under the lock after every change.
+//! tables (the zone cache has its own, since it may fetch), the peer's
+//! source address as the proof, files saved from under the lock after
+//! every change and the change rolled back when the save fails.
 
 use crate::jws::{self, Jwk, JwsError};
 use crate::nonce::NoncePool;
@@ -12,22 +13,25 @@ use crate::store::AcmeStore;
 use crate::x509::{self, Root};
 use crate::zone::ZoneCache;
 use crate::{
-    DEFAULT_LEAF_VALIDITY_SECS, ErrorType, Identifier, MAX_BODY, MAX_CONTACTS, MAX_NONCES,
+    BODY_TIMEOUT_SECS, CONNECTION_TIMEOUT_SECS, DEFAULT_LEAF_VALIDITY_SECS, ErrorType,
+    HEADER_TIMEOUT_SECS, Identifier, MAX_BODY, MAX_CONTACTS, MAX_NONCES, MAX_ORDERS_PER_ACCOUNT,
     NONCE_TTL_SECS, Problem, rfc3339,
 };
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, State};
+use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Router, middleware};
 use base64::Engine;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use pubpki_core::pubdom_core::Npub;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
@@ -64,6 +68,8 @@ pub struct AppState {
     root: Root,
     store: AcmeStore,
     inner: Mutex<Inner>,
+    /// Apart from the tables: a relay fetch must not stall every request.
+    zone: Mutex<ZoneCache>,
 }
 
 struct Inner {
@@ -74,7 +80,6 @@ struct Inner {
     accounts: Vec<Account>,
     orders: Vec<Order>,
     index: Vec<CertEntry>,
-    zone: ZoneCache,
 }
 
 impl AppState {
@@ -115,8 +120,8 @@ impl AppState {
                 accounts,
                 orders,
                 index,
-                zone,
             }),
+            zone: Mutex::new(zone),
         })
     }
 
@@ -143,7 +148,7 @@ pub async fn bind(cfg: &ServeConfig, retries: u32) -> Result<TcpListener, String
             Err(e) if attempt < retries => {
                 attempt += 1;
                 tracing::warn!(listen = %cfg.listen, %e, attempt, "bind failed; the fips address may not be up yet");
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
             }
             Err(e) => return Err(format!("{}: {e}", cfg.listen)),
         }
@@ -176,19 +181,54 @@ fn try_bind(cfg: &ServeConfig) -> std::io::Result<TcpListener> {
     TcpListener::from_std(socket.into())
 }
 
-/// Serve until `shutdown` completes.
+/// Serve until `shutdown` completes. Every connection gets a deadline
+/// for its request head (`HEADER_TIMEOUT_SECS`) and for its whole life
+/// (`CONNECTION_TIMEOUT_SECS`); bodies have theirs in the handlers. A
+/// peer holding a socket open gets nothing out of it.
 pub async fn serve(
     state: Arc<AppState>,
     listener: TcpListener,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), String> {
-    axum::serve(
-        listener,
-        router(state).into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown)
-    .await
-    .map_err(|e| e.to_string())
+    let app = router(state);
+    let mut shutdown = Box::pin(shutdown);
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => return Ok(()),
+            accepted = listener.accept() => {
+                let (stream, addr) = match accepted {
+                    Ok(a) => a,
+                    Err(e) => {
+                        tracing::warn!(%e, "accept failed");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let svc = hyper::service::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+                        req.extensions_mut().insert(ConnectInfo(addr));
+                        let app = app.clone();
+                        async move {
+                            let resp = tower::ServiceExt::oneshot(app, req).await;
+                            resp.map_err(|never| match never {})
+                        }
+                    });
+                    let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+                    builder
+                        .http1()
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(Duration::from_secs(HEADER_TIMEOUT_SECS));
+                    let conn = builder.serve_connection(TokioIo::new(stream), svc);
+                    match tokio::time::timeout(Duration::from_secs(CONNECTION_TIMEOUT_SECS), conn).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => tracing::debug!(peer = %addr, %e, "connection ended"),
+                        Err(_) => tracing::info!(peer = %addr, "connection cut at the deadline"),
+                    }
+                });
+            }
+        }
+    }
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -301,6 +341,15 @@ impl Reply {
         }
     }
 
+    fn empty(status: StatusCode) -> Self {
+        Self {
+            status,
+            content_type: "application/json",
+            body: Vec::new(),
+            headers: Vec::new(),
+        }
+    }
+
     fn location(mut self, url: String) -> Self {
         self.headers.push(("location", url));
         self
@@ -308,9 +357,21 @@ impl Reply {
 }
 
 /// Finish a reply or a problem with `Replay-Nonce`, the index link and
-/// no caching (RFC 8555 §6.5, §7.1).
-fn finish(state: &AppState, inner: &mut Inner, r: Result<Reply, Problem>) -> Response {
-    let nonce = inner.nonces.issue(now(), rand::random());
+/// no caching (RFC 8555 §6.5, §7.1). The nonce is remembered for an
+/// allowed peer only: an unallowed one may read the directory, and its
+/// POST is refused before any nonce is looked at, so storing one for it
+/// would only let it crowd the pool.
+fn finish(
+    state: &AppState,
+    inner: &mut Inner,
+    allowed: bool,
+    r: Result<Reply, Problem>,
+) -> Response {
+    let nonce = if allowed {
+        inner.nonces.issue(now(), rand::random())
+    } else {
+        random_id()
+    };
     let mut resp = match r {
         Ok(reply) => {
             let mut resp = Response::new(Body::from(reply.body));
@@ -341,7 +402,11 @@ fn finish(state: &AppState, inner: &mut Inner, r: Result<Reply, Problem>) -> Res
     resp
 }
 
-async fn directory(State(state): State<Arc<AppState>>) -> Response {
+fn is_allowed(ext: &axum::http::Extensions) -> bool {
+    ext.get::<PeerKey>().is_some()
+}
+
+async fn directory(State(state): State<Arc<AppState>>, req: axum::extract::Request) -> Response {
     let b = &state.cfg.base_url;
     let v = serde_json::json!({
         "newNonce": format!("{b}/acme/new-nonce"),
@@ -353,8 +418,14 @@ async fn directory(State(state): State<Arc<AppState>>) -> Response {
             "caaIdentities": [state.cfg.ca_domain],
         }
     });
+    let allowed = is_allowed(req.extensions());
     let mut inner = state.inner.lock().await;
-    finish(&state, &mut inner, Ok(Reply::json(StatusCode::OK, &v)))
+    finish(
+        &state,
+        &mut inner,
+        allowed,
+        Ok(Reply::json(StatusCode::OK, &v)),
+    )
 }
 
 async fn new_nonce(State(state): State<Arc<AppState>>, req: axum::extract::Request) -> Response {
@@ -363,19 +434,40 @@ async fn new_nonce(State(state): State<Arc<AppState>>, req: axum::extract::Reque
     } else {
         StatusCode::NO_CONTENT
     };
+    let allowed = is_allowed(req.extensions());
     let mut inner = state.inner.lock().await;
-    let mut r = finish(
-        &state,
-        &mut inner,
-        Ok(Reply {
-            status,
-            content_type: "application/json",
-            body: Vec::new(),
-            headers: Vec::new(),
-        }),
-    );
+    let mut r = finish(&state, &mut inner, allowed, Ok(Reply::empty(status)));
     r.headers_mut().remove(header::CONTENT_TYPE);
     r
+}
+
+/// A POST's head and body, read with a deadline; a failure is a finished
+/// problem reply, nonce and all.
+async fn read_body(
+    state: &AppState,
+    req: axum::extract::Request,
+) -> Result<(Parts, Bytes), Box<Response>> {
+    let (parts, body) = req.into_parts();
+    let read = tokio::time::timeout(
+        Duration::from_secs(BODY_TIMEOUT_SECS),
+        axum::body::to_bytes(body, MAX_BODY),
+    )
+    .await;
+    let problem = match read {
+        Ok(Ok(bytes)) => return Ok((parts, bytes)),
+        Ok(Err(_)) => Problem::new(
+            ErrorType::Malformed,
+            format!("body unreadable or over {MAX_BODY} bytes"),
+        ),
+        Err(_) => Problem::new(ErrorType::Malformed, "body not received in time"),
+    };
+    let mut inner = state.inner.lock().await;
+    Err(Box::new(finish(
+        state,
+        &mut inner,
+        is_allowed(&parts.extensions),
+        Err(problem),
+    )))
 }
 
 /// A verified POST: with which key, as which account, saying what.
@@ -387,14 +479,10 @@ struct Posted {
 
 fn jws_problem(e: JwsError) -> Problem {
     match e {
-        JwsError::BadSignatureAlgorithm => {
-            let mut p = Problem::new(
-                ErrorType::BadSignatureAlgorithm,
-                "use ES256, RS256 or EdDSA",
-            );
-            p.detail.push_str(" (algorithms: ES256, RS256, EdDSA)");
-            p
-        }
+        JwsError::BadSignatureAlgorithm => Problem::new(
+            ErrorType::BadSignatureAlgorithm,
+            "use ES256, RS256 or EdDSA (algorithms: ES256, RS256, EdDSA)",
+        ),
         JwsError::BadPublicKey(why) => Problem::new(ErrorType::BadPublicKey, why),
         JwsError::Signature => {
             Problem::new(ErrorType::Malformed, "the JWS signature does not verify")
@@ -403,7 +491,9 @@ fn jws_problem(e: JwsError) -> Problem {
     }
 }
 
-/// RFC 8555 §6.2–§6.5: parse, nonce, url, key, signature.
+/// RFC 8555 §6.2–§6.5: parse, nonce, url, key, signature, and only then
+/// whose account it is, so that nothing about an account is learnt from
+/// a request its key did not sign.
 fn authenticate(
     state: &AppState,
     inner: &mut Inner,
@@ -449,7 +539,6 @@ fn authenticate(
                 .account(id)
                 .cloned()
                 .ok_or_else(|| Problem::new(ErrorType::AccountDoesNotExist, "no such account"))?;
-            policy::same_peer(&acct, peer)?;
             (acct.key.clone(), Some(acct))
         }
         _ => return Err(Problem::new(ErrorType::Malformed, "jwk or kid")),
@@ -487,8 +576,11 @@ fn order_json(state: &AppState, o: &Order) -> serde_json::Value {
         v["certificate"] = serde_json::json!(format!("{b}/acme/cert/{serial}"));
     }
     if let Some(e) = &o.error {
-        v["error"] =
-            serde_json::json!({ "type": "urn:ietf:params:acme:error:badCSR", "detail": e });
+        // Stored as the problem's display, "<urn>: <detail>".
+        let (urn, detail) = e
+            .split_once(": ")
+            .unwrap_or(("urn:ietf:params:acme:error:serverInternal", e));
+        v["error"] = serde_json::json!({ "type": urn, "detail": detail });
     }
     v
 }
@@ -512,11 +604,32 @@ fn authz_json(state: &AppState, a: &Authz) -> serde_json::Value {
     })
 }
 
-fn peer_of(req_ext: &axum::http::Extensions) -> Result<Npub, Problem> {
-    req_ext
-        .get::<PeerKey>()
+fn peer_of(ext: &axum::http::Extensions) -> Result<Npub, Problem> {
+    ext.get::<PeerKey>()
         .map(|p| p.0)
         .ok_or_else(|| Problem::new(ErrorType::ServerInternal, "no peer"))
+}
+
+fn internal(e: &str) -> Problem {
+    tracing::error!(error = %e, "state not saved");
+    Problem::new(ErrorType::ServerInternal, "state could not be saved")
+}
+
+/// The one shape of every POST handler: read the body with its deadline,
+/// run `f` under the lock, finish.
+macro_rules! posted {
+    ($state:expr, $req:expr, |$parts:ident, $body:ident, $inner:ident, $peer:ident| $f:block) => {{
+        let ($parts, $body) = match read_body(&$state, $req).await {
+            Ok(x) => x,
+            Err(resp) => return *resp,
+        };
+        let mut $inner = $state.inner.lock().await;
+        let r = (|| -> Result<Reply, Problem> {
+            let $peer = peer_of(&$parts.extensions)?;
+            $f
+        })();
+        finish(&$state, &mut $inner, true, r)
+    }};
 }
 
 #[derive(Deserialize, Default)]
@@ -527,15 +640,24 @@ struct NewAccountPayload {
     only_return_existing: bool,
 }
 
+fn check_contacts(contact: &[String]) -> Result<(), Problem> {
+    if contact.len() > MAX_CONTACTS {
+        return Err(Problem::new(
+            ErrorType::Malformed,
+            format!("at most {MAX_CONTACTS} contacts"),
+        ));
+    }
+    if let Some(c) = contact.iter().find(|c| !c.starts_with("mailto:")) {
+        return Err(Problem::new(
+            ErrorType::UnsupportedContact,
+            format!("{c}: only mailto: contacts"),
+        ));
+    }
+    Ok(())
+}
+
 async fn new_account(State(state): State<Arc<AppState>>, req: axum::extract::Request) -> Response {
-    let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return Problem::new(ErrorType::Malformed, "body").into_response(),
-    };
-    let mut inner = state.inner.lock().await;
-    let r = (|| {
-        let peer = peer_of(&parts.extensions)?;
+    posted!(state, req, |parts, body, inner, peer| {
         let posted = authenticate(&state, &mut inner, peer, &parts.uri, &body, true)?;
         let payload: NewAccountPayload = match posted.payload {
             Some(v) => serde_json::from_value(v)
@@ -545,7 +667,6 @@ async fn new_account(State(state): State<Arc<AppState>>, req: axum::extract::Req
         let id = jws::thumbprint(&posted.jwk);
         let url = format!("{}/acme/acct/{id}", state.cfg.base_url);
         if let Some(existing) = &posted.account {
-            policy::same_peer(existing, peer)?;
             return Ok(Reply::json(StatusCode::OK, &account_json(&state, existing)).location(url));
         }
         if payload.only_return_existing {
@@ -554,18 +675,7 @@ async fn new_account(State(state): State<Arc<AppState>>, req: axum::extract::Req
                 "no account for this key",
             ));
         }
-        if payload.contact.len() > MAX_CONTACTS {
-            return Err(Problem::new(
-                ErrorType::Malformed,
-                format!("at most {MAX_CONTACTS} contacts"),
-            ));
-        }
-        if let Some(c) = payload.contact.iter().find(|c| !c.starts_with("mailto:")) {
-            return Err(Problem::new(
-                ErrorType::UnsupportedContact,
-                format!("{c}: only mailto: contacts"),
-            ));
-        }
+        check_contacts(&payload.contact)?;
         let acct = Account {
             id: id.clone(),
             key: posted.jwk.clone(),
@@ -575,19 +685,13 @@ async fn new_account(State(state): State<Arc<AppState>>, req: axum::extract::Req
             created_at: now(),
         };
         inner.accounts.push(acct.clone());
-        state
-            .store
-            .save_accounts(&inner.accounts)
-            .map_err(|e| internal(&e))?;
+        if let Err(e) = state.store.save_accounts(&inner.accounts) {
+            inner.accounts.pop();
+            return Err(internal(&e));
+        }
         tracing::info!(account = %id, node = %peer, "account created");
         Ok(Reply::json(StatusCode::CREATED, &account_json(&state, &acct)).location(url))
-    })();
-    finish(&state, &mut inner, r)
-}
-
-fn internal(e: &str) -> Problem {
-    tracing::error!(error = %e, "state not saved");
-    Problem::new(ErrorType::ServerInternal, "state could not be saved")
+    })
 }
 
 #[derive(Deserialize, Default)]
@@ -602,14 +706,7 @@ async fn account(
     Path(id): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return Problem::new(ErrorType::Malformed, "body").into_response(),
-    };
-    let mut inner = state.inner.lock().await;
-    let r = (|| {
-        let peer = peer_of(&parts.extensions)?;
+    posted!(state, req, |parts, body, inner, peer| {
         let posted = authenticate(&state, &mut inner, peer, &parts.uri, &body, false)?;
         let acct = posted
             .account
@@ -617,37 +714,38 @@ async fn account(
         if acct.id != id {
             return Err(Problem::new(ErrorType::Unauthorized, "not your account"));
         }
-        if let Some(v) = posted.payload {
-            let update: AccountUpdate = serde_json::from_value(v)
-                .map_err(|e| Problem::new(ErrorType::Malformed, e.to_string()))?;
-            let a = inner
-                .accounts
-                .iter_mut()
-                .find(|a| a.id == id)
-                .ok_or_else(|| Problem::new(ErrorType::AccountDoesNotExist, "gone"))?;
-            if let Some(c) = update.contact {
-                if c.len() > MAX_CONTACTS || c.iter().any(|c| !c.starts_with("mailto:")) {
-                    return Err(Problem::new(
-                        ErrorType::UnsupportedContact,
-                        "only mailto: contacts, at most 8",
-                    ));
-                }
-                a.contact = c;
-            }
-            if update.status.as_deref() == Some("deactivated") {
-                a.status = AccountStatus::Deactivated;
-                tracing::info!(account = %id, "account deactivated");
-            }
-            let a = a.clone();
-            state
-                .store
-                .save_accounts(&inner.accounts)
-                .map_err(|e| internal(&e))?;
-            return Ok(Reply::json(StatusCode::OK, &account_json(&state, &a)));
+        let Some(v) = posted.payload else {
+            return Ok(Reply::json(StatusCode::OK, &account_json(&state, &acct)));
+        };
+        let update: AccountUpdate = serde_json::from_value(v)
+            .map_err(|e| Problem::new(ErrorType::Malformed, e.to_string()))?;
+        if let Some(c) = &update.contact {
+            check_contacts(c)?;
         }
-        Ok(Reply::json(StatusCode::OK, &account_json(&state, &acct)))
-    })();
-    finish(&state, &mut inner, r)
+        let idx = inner
+            .accounts
+            .iter()
+            .position(|a| a.id == id)
+            .ok_or_else(|| Problem::new(ErrorType::AccountDoesNotExist, "gone"))?;
+        let before = inner.accounts[idx].clone();
+        if let Some(c) = update.contact {
+            inner.accounts[idx].contact = c;
+        }
+        if update.status.as_deref() == Some("deactivated") {
+            inner.accounts[idx].status = AccountStatus::Deactivated;
+        }
+        if let Err(e) = state.store.save_accounts(&inner.accounts) {
+            inner.accounts[idx] = before;
+            return Err(internal(&e));
+        }
+        if inner.accounts[idx].status == AccountStatus::Deactivated {
+            tracing::info!(account = %id, "account deactivated");
+        }
+        Ok(Reply::json(
+            StatusCode::OK,
+            &account_json(&state, &inner.accounts[idx]),
+        ))
+    })
 }
 
 async fn account_orders(
@@ -655,14 +753,7 @@ async fn account_orders(
     Path(id): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return Problem::new(ErrorType::Malformed, "body").into_response(),
-    };
-    let mut inner = state.inner.lock().await;
-    let r = (|| {
-        let peer = peer_of(&parts.extensions)?;
+    posted!(state, req, |parts, body, inner, peer| {
         let posted = authenticate(&state, &mut inner, peer, &parts.uri, &body, false)?;
         let acct = posted
             .account
@@ -680,8 +771,7 @@ async fn account_orders(
             StatusCode::OK,
             &serde_json::json!({ "orders": urls }),
         ))
-    })();
-    finish(&state, &mut inner, r)
+    })
 }
 
 #[derive(Deserialize)]
@@ -697,17 +787,15 @@ struct NewOrderPayload {
 }
 
 async fn new_order(State(state): State<Arc<AppState>>, req: axum::extract::Request) -> Response {
-    let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return Problem::new(ErrorType::Malformed, "body").into_response(),
-    };
-    let mut inner = state.inner.lock().await;
-    // The zone first: it may fetch, and must not hold the request's
-    // authentication state meanwhile.
-    let zone = inner.zone.get(&state.cfg.ca_domain, now()).await;
-    let r = (|| {
-        let peer = peer_of(&parts.extensions)?;
+    // The zone first and on its own lock: a relay fetch must not hold
+    // the tables, and nothing of this request is consumed yet.
+    let zone = state
+        .zone
+        .lock()
+        .await
+        .get(&state.cfg.ca_domain, now())
+        .await;
+    posted!(state, req, |parts, body, inner, peer| {
         let posted = authenticate(&state, &mut inner, peer, &parts.uri, &body, false)?;
         let acct = posted
             .account
@@ -731,21 +819,29 @@ async fn new_order(State(state): State<Arc<AppState>>, req: axum::extract::Reque
         let names = policy::approve(&ids, peer, &state.cfg.ca_domain, zone.as_ref())
             .map_err(|r| policy::rejected(&r))?;
         let t = now();
+        inner.orders.retain(|o| !o.is_expired(t));
+        let live = inner.orders.iter().filter(|o| o.account == acct.id).count();
+        if live >= MAX_ORDERS_PER_ACCOUNT {
+            return Err(Problem::new(
+                ErrorType::RateLimited,
+                format!(
+                    "{live} live orders; at most {MAX_ORDERS_PER_ACCOUNT} (they expire within the hour)"
+                ),
+            ));
+        }
         let order = Order::new(random_id(), &acct, ids, names, t, random_id);
         let url = format!("{}/acme/order/{}", state.cfg.base_url, order.id);
         let v = order_json(&state, &order);
-        inner.orders.retain(|o| !o.is_expired(t));
         inner.orders.push(order);
-        state
-            .store
-            .save_orders(&inner.orders, t)
-            .map_err(|e| internal(&e))?;
+        if let Err(e) = state.store.save_orders(&inner.orders, t) {
+            inner.orders.pop();
+            return Err(internal(&e));
+        }
         Ok(Reply::json(StatusCode::CREATED, &v).location(url))
-    })();
-    finish(&state, &mut inner, r)
+    })
 }
 
-/// The order `id` of this account, live.
+/// The order `id` of this account.
 fn own_order<'a>(inner: &'a Inner, acct: &Account, id: &str) -> Result<&'a Order, Problem> {
     inner
         .orders
@@ -759,22 +855,14 @@ async fn order(
     Path(id): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return Problem::new(ErrorType::Malformed, "body").into_response(),
-    };
-    let mut inner = state.inner.lock().await;
-    let r = (|| {
-        let peer = peer_of(&parts.extensions)?;
+    posted!(state, req, |parts, body, inner, peer| {
         let posted = authenticate(&state, &mut inner, peer, &parts.uri, &body, false)?;
         let acct = posted
             .account
             .ok_or_else(|| Problem::new(ErrorType::Malformed, "kid"))?;
         let o = own_order(&inner, &acct, &id)?;
         Ok(Reply::json(StatusCode::OK, &order_json(&state, o)))
-    })();
-    finish(&state, &mut inner, r)
+    })
 }
 
 #[derive(Deserialize)]
@@ -787,14 +875,7 @@ async fn finalize(
     Path(id): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return Problem::new(ErrorType::Malformed, "body").into_response(),
-    };
-    let mut inner = state.inner.lock().await;
-    let r = (|| {
-        let peer = peer_of(&parts.extensions)?;
+    posted!(state, req, |parts, body, inner, peer| {
         let posted = authenticate(&state, &mut inner, peer, &parts.uri, &body, false)?;
         let acct = posted
             .account
@@ -816,68 +897,79 @@ async fn finalize(
                 format!("order is {:?}", o.status),
             ));
         }
-        let der = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(&payload.csr)
-            .map_err(|_| Problem::new(ErrorType::BadCsr, "csr is not base64url"))?;
-        let outcome = (|| -> Result<(x509::Leaf, Vec<String>), Problem> {
-            let (csr, facts) = x509::inspect_csr(&der)?;
-            policy::csr_matches(&o.names, &facts.sans, facts.cn.as_deref())?;
-            let leaf = x509::issue(
-                &state.root,
-                csr,
-                &o.names,
-                t,
-                state.cfg.leaf_validity_secs,
-                x509::random_serial(),
-            )
-            .map_err(|e| Problem::new(ErrorType::ServerInternal, e.to_string()))?;
-            Ok((leaf, o.names.clone()))
-        })();
         let idx = inner
             .orders
             .iter()
             .position(|x| x.id == id)
             .ok_or_else(|| Problem::new(ErrorType::Malformed, "no such order"))?;
-        match outcome {
-            Ok((leaf, names)) => {
-                // Chain and index first; only then does the order say valid.
-                state
-                    .store
-                    .write_chain(&leaf.serial, &leaf.chain_pem)
-                    .map_err(|e| internal(&e))?;
-                inner.index.push(CertEntry {
-                    serial: leaf.serial.clone(),
-                    npub: peer,
-                    account: acct.id.clone(),
-                    names: names.clone(),
-                    not_before: leaf.not_before,
-                    not_after: leaf.not_after,
-                    revoked: None,
-                });
-                state
-                    .store
-                    .save_index(&inner.index)
-                    .map_err(|e| internal(&e))?;
-                inner.orders[idx].finalize(Ok(leaf.serial.clone()))?;
-                state
-                    .store
-                    .save_orders(&inner.orders, t)
-                    .map_err(|e| internal(&e))?;
-                tracing::info!(serial = %leaf.serial, node = %peer, names = ?names, "certificate issued");
-                Ok(
-                    Reply::json(StatusCode::OK, &order_json(&state, &inner.orders[idx]))
-                        .location(format!("{}/acme/order/{id}", state.cfg.base_url)),
-                )
-            }
+        // The client's part: a CSR the order allows. A refusal here makes
+        // the order invalid (RFC 8555 §7.4 allows it; a client opens a
+        // new order, which costs nothing here).
+        let der = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&payload.csr)
+            .map_err(|_| Problem::new(ErrorType::BadCsr, "csr is not base64url"));
+        let checked = der.and_then(|der| {
+            let (csr, facts) = x509::inspect_csr(&der)?;
+            policy::csr_matches(&o.names, &facts.sans, facts.cn.as_deref())?;
+            Ok(csr)
+        });
+        let csr = match checked {
+            Ok(csr) => csr,
             Err(p) => {
                 let _ = inner.orders[idx].finalize(Err(p.clone()));
                 let _ = state.store.save_orders(&inner.orders, t);
                 tracing::info!(order = %id, node = %peer, problem = %p, "finalize refused");
-                Err(p)
+                return Err(p);
             }
+        };
+        // The server's part: a fault here leaves the order ready, so the
+        // client retries finalize rather than opening a new order.
+        let leaf = x509::issue(
+            &state.root,
+            csr,
+            &o.names,
+            t,
+            state.cfg.leaf_validity_secs,
+            x509::random_serial(),
+        )
+        .map_err(|e| {
+            tracing::error!(order = %id, %e, "issuing failed");
+            Problem::new(
+                ErrorType::ServerInternal,
+                "the certificate could not be signed",
+            )
+        })?;
+        // Chain and index first; only then does the order say valid.
+        state
+            .store
+            .write_chain(&leaf.serial, &leaf.chain_pem)
+            .map_err(|e| internal(&e))?;
+        inner.index.push(CertEntry {
+            serial: leaf.serial.clone(),
+            npub: peer,
+            account: acct.id.clone(),
+            names: o.names.clone(),
+            not_before: leaf.not_before,
+            not_after: leaf.not_after,
+            revoked: None,
+        });
+        if let Err(e) = state.store.save_index(&inner.index) {
+            inner.index.pop();
+            return Err(internal(&e));
         }
-    })();
-    finish(&state, &mut inner, r)
+        inner.orders[idx].finalize(Ok(leaf.serial.clone()))?;
+        if let Err(e) = state.store.save_orders(&inner.orders, t) {
+            // The certificate exists and is recorded; the order's state
+            // is what did not land. Say so, keep the order valid in
+            // memory: a POST-as-GET of the order shows the certificate.
+            tracing::error!(order = %id, error = %e, "order state not saved");
+        }
+        tracing::info!(serial = %leaf.serial, node = %peer, names = ?o.names, "certificate issued");
+        Ok(
+            Reply::json(StatusCode::OK, &order_json(&state, &inner.orders[idx]))
+                .location(format!("{}/acme/order/{id}", state.cfg.base_url)),
+        )
+    })
 }
 
 fn find_authz<'a>(inner: &'a Inner, acct: &Account, id: &str) -> Option<&'a Authz> {
@@ -894,14 +986,7 @@ async fn authz(
     Path(id): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return Problem::new(ErrorType::Malformed, "body").into_response(),
-    };
-    let mut inner = state.inner.lock().await;
-    let r = (|| {
-        let peer = peer_of(&parts.extensions)?;
+    posted!(state, req, |parts, body, inner, peer| {
         let posted = authenticate(&state, &mut inner, peer, &parts.uri, &body, false)?;
         let acct = posted
             .account
@@ -912,8 +997,7 @@ async fn authz(
         // authorization: it was valid by construction and expires with
         // its order; nothing else is issued from it.
         Ok(Reply::json(StatusCode::OK, &authz_json(&state, a)))
-    })();
-    finish(&state, &mut inner, r)
+    })
 }
 
 async fn challenge(
@@ -921,14 +1005,7 @@ async fn challenge(
     Path(id): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return Problem::new(ErrorType::Malformed, "body").into_response(),
-    };
-    let mut inner = state.inner.lock().await;
-    let r = (|| {
-        let peer = peer_of(&parts.extensions)?;
+    posted!(state, req, |parts, body, inner, peer| {
         let posted = authenticate(&state, &mut inner, peer, &parts.uri, &body, false)?;
         let acct = posted
             .account
@@ -946,8 +1023,7 @@ async fn challenge(
             format!("<{}/acme/authz/{}>;rel=\"up\"", state.cfg.base_url, a.id),
         ));
         Ok(reply)
-    })();
-    finish(&state, &mut inner, r)
+    })
 }
 
 async fn certificate(
@@ -955,14 +1031,7 @@ async fn certificate(
     Path(serial): Path<String>,
     req: axum::extract::Request,
 ) -> Response {
-    let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return Problem::new(ErrorType::Malformed, "body").into_response(),
-    };
-    let mut inner = state.inner.lock().await;
-    let r = (|| {
-        let peer = peer_of(&parts.extensions)?;
+    posted!(state, req, |parts, body, inner, peer| {
         let _ = authenticate(&state, &mut inner, peer, &parts.uri, &body, false)?;
         let entry = inner
             .index
@@ -982,8 +1051,7 @@ async fn certificate(
             body: pem.into_bytes(),
             headers: Vec::new(),
         })
-    })();
-    finish(&state, &mut inner, r)
+    })
 }
 
 #[derive(Deserialize)]
@@ -993,8 +1061,7 @@ struct RevokePayload {
     reason: Option<u32>,
 }
 
-/// The serial of a DER certificate, as the index spells it (hex, no
-/// leading zero bytes).
+/// The serial of a DER certificate, as the index spells it.
 fn serial_of(der: &[u8]) -> Result<String, Problem> {
     use x509_parser::prelude::*;
     let (_, cert) = parse_x509_certificate(der)
@@ -1002,19 +1069,8 @@ fn serial_of(der: &[u8]) -> Result<String, Problem> {
     Ok(crate::x509::hex(cert.raw_serial()))
 }
 
-fn same_serial(a: &str, b: &str) -> bool {
-    a.trim_start_matches("00") == b.trim_start_matches("00")
-}
-
 async fn revoke(State(state): State<Arc<AppState>>, req: axum::extract::Request) -> Response {
-    let (parts, body) = req.into_parts();
-    let body = match axum::body::to_bytes(body, MAX_BODY).await {
-        Ok(b) => b,
-        Err(_) => return Problem::new(ErrorType::Malformed, "body").into_response(),
-    };
-    let mut inner = state.inner.lock().await;
-    let r = (|| {
-        let peer = peer_of(&parts.extensions)?;
+    posted!(state, req, |parts, body, inner, peer| {
         let posted = authenticate(&state, &mut inner, peer, &parts.uri, &body, true)?;
         if posted.account.is_none() {
             return Err(Problem::new(
@@ -1033,27 +1089,20 @@ async fn revoke(State(state): State<Arc<AppState>>, req: axum::extract::Request)
             .map_err(|_| Problem::new(ErrorType::Malformed, "certificate is not base64url"))?;
         let serial = serial_of(&der)?;
         let t = now();
-        let entry = inner
+        let idx = inner
             .index
-            .iter_mut()
-            .find(|e| same_serial(&e.serial, &serial))
+            .iter()
+            .position(|e| e.serial == serial)
             .ok_or_else(|| Problem::new(ErrorType::Unauthorized, "not a certificate of this CA"))?;
-        policy::may_revoke(entry, peer, payload.reason)?;
-        entry.revoked = Some((t, payload.reason.unwrap_or(0)));
-        let serial = entry.serial.clone();
-        state
-            .store
-            .save_index(&inner.index)
-            .map_err(|e| internal(&e))?;
+        policy::may_revoke(&inner.index[idx], peer, payload.reason)?;
+        inner.index[idx].revoked = Some((t, payload.reason.unwrap_or(0)));
+        if let Err(e) = state.store.save_index(&inner.index) {
+            inner.index[idx].revoked = None;
+            return Err(internal(&e));
+        }
         tracing::info!(serial = %serial, node = %peer, reason = ?payload.reason, "certificate revoked");
-        Ok(Reply {
-            status: StatusCode::OK,
-            content_type: "application/json",
-            body: Vec::new(),
-            headers: Vec::new(),
-        })
-    })();
-    finish(&state, &mut inner, r)
+        Ok(Reply::empty(StatusCode::OK))
+    })
 }
 
 /// For the CLI's `acme status`: what the tables hold.
