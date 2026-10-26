@@ -71,3 +71,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failing bundle counts.
 - Documentation: `docs/how-it-works.md`, `docs/install.md`,
   `docs/issuer.md`, `docs/users.md`.
+
+### Changed
+
+- A `usage` value the client does not know is kept
+  (`Certificate::other_usages`) and counts as a usage: a certificate
+  whose usages are all unknown allows nothing, instead of being read as
+  a plain sign+encrypt key. Only a certificate with no `usage` tag at
+  all implies `sign` and `encrypt`. `Issuer::renew` and `revoke` take
+  the event and carry its content.
