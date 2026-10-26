@@ -59,7 +59,13 @@ sudo fips-pubpki acme status
 The unit runs `fips-pubpki acme serve`: it binds the node's fips address
 (waiting up to a minute for the tun to come up) and, on Linux with
 `acme_interface: fips0` set, the interface itself; it re-reads the
-allowlist when it changes, so `acme allow` needs no restart. `acme deny`
+allowlist when it changes, so `acme allow` needs no restart. It decides
+where the zone comes from at start: the configured file (whose
+`acme_zone_author` must then name the node serving that zone), the
+server's own `/etc/fips-pubdom/zones/<domain>.yaml`, the configured
+`acme_zone_servers`, or the servers the `_fips-dns` record names; when
+that record cannot be looked up at all the server exits so the unit
+retries, rather than quietly issuing `.fips` names only. `acme deny`
 withdraws a node; what it already holds runs out within the
 certificate's validity (30 days by default), or the node revokes it.
 
@@ -67,7 +73,7 @@ Configuration keys ([users.md](users.md#configuration) has the rest):
 
 ```yaml
 acme_node: npub1…                      # the listener is its fd… address
-acme_port: 8555
+acme_port: 8555                        # the port clients expect; another one is not discoverable
 acme_interface: fips0                  # Linux: accept from the fips tun only
 acme_validity_days: 30                 # leaves; clients renew
 acme_zone_file: /etc/fips-pubdom/zones/example.org.yaml   # default if present

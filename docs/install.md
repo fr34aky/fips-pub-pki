@@ -87,16 +87,17 @@ renewal loop:
 
 ```bash
 sudo fips-pubpki ca publish            # the claim with its DNSSEC chain, and anything issued
-sudo groupadd -f fips-pubpki
+sudo useradd --system --user-group --home-dir /var/lib/fips-pubpki --shell /usr/sbin/nologin fips-pubpki 2>/dev/null || true
 sudo chgrp fips-pubpki /etc/fips-pubpki/ca.key && sudo chmod 0640 /etc/fips-pubpki/ca.key
-sudo chgrp -R fips-pubpki /var/lib/fips-pubpki && sudo chmod 0775 /var/lib/fips-pubpki
+sudo chown -R fips-pubpki:fips-pubpki /var/lib/fips-pubpki
 sudo systemctl daemon-reload
 sudo systemctl enable --now fips-pubpki-ca.service
 systemctl status fips-pubpki-ca.service
 ```
 
-The unit runs `fips-pubpki ca renew --watch` as a dynamic user in group
-`fips-pubpki`: it reads the key, re-issues every live certificate halfway
+The unit runs `fips-pubpki ca renew --watch` as the system user
+`fips-pubpki` (the ACME unit, if you run it, shares that user and the
+state directory): it reads the key, re-issues every live certificate halfway
 through its validity, writes `issued.json`, and publishes. Issue and
 revoke by hand with `sudo -g fips-pubpki fips-pubpki ca issue …` or as
 root; the loop picks the new certificates up at its next check (within
@@ -110,6 +111,7 @@ node.
 sudo install -m 0644 packaging/systemd/fips-pubpki-acme.service /etc/systemd/system/
 sudo fips-pubpki acme init --node npub1…        # the node's key; writes the root, publishes the statement
 sudo chgrp fips-pubpki /etc/fips-pubpki/x509-root.key && sudo chmod 0640 /etc/fips-pubpki/x509-root.key
+sudo chown -R fips-pubpki:fips-pubpki /var/lib/fips-pubpki
 sudo fips-pubpki acme allow npub1…              # each node that may ask
 sudo systemctl daemon-reload
 sudo systemctl enable --now fips-pubpki-acme.service

@@ -6,11 +6,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Not root: a throwaway user that can read the issuer key and write the
-# issued file. The key is /etc/fips-pubpki/ca.key, group fips-pubpki,
-# mode 0640 (docs/install.md); the state directory is created by systemd.
-DynamicUser=yes
-SupplementaryGroups=fips-pubpki
+# Not root: the system user fips-pubpki (install.md creates it), shared by
+# both units so that the state directory has one owner.
+User=fips-pubpki
+Group=fips-pubpki
 StateDirectory=fips-pubpki
 ConfigurationDirectory=fips-pubpki
 ExecStart=/usr/bin/fips-pubpki --config /etc/fips-pubpki/config.yaml ca renew --watch

@@ -1,16 +1,19 @@
 //! `fips-pubpki acme …` and `fips-pubpki trust` (docs/acme.md): the
 //! issuer's side of TLS on the mesh, and the client's.
 
-use crate::{in_days, open_issuer, parse_npub, print_path, record_and_publish, write_out};
+use crate::{
+    in_days, open_issuer, parse_npub, print_path, record_and_publish, write_out, write_secret,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Subcommand;
 use pubpki::pubdom_resolve::RelayClient;
 use pubpki::pubdom_resolve::txt::TxtVerifier;
+use pubpki::pubpki_core::Name;
 use pubpki::pubpki_core::name::overlay_key;
-use pubpki::pubpki_core::pubdom_core::Npub;
 use pubpki::pubpki_core::pubdom_core::policy::TxtLookup;
-use pubpki::pubpki_core::{Name, Resolution};
+use pubpki::pubpki_core::pubdom_core::{Npub, SERVICE_DNS};
 use pubpki::{Config, Issuer, Request, Verifier, now};
+use pubpki_acme::DEFAULT_PORT;
 use pubpki_acme::policy::Allowlist;
 use pubpki_acme::server::{AppState, ServeConfig, bind, serve};
 use pubpki_acme::store::AcmeStore;
@@ -50,17 +53,36 @@ pub enum AcmeCmd {
     Status,
 }
 
+/// The root, when both files exist; neither is "no root yet"; one of
+/// the two is a broken installation to say so about, never something to
+/// paper over by generating a new root (clients trusted the old one).
 fn root_files(cfg: &Config) -> Result<Option<Root>> {
-    if !cfg.acme_root_key.exists() || !cfg.acme_root_cert.exists() {
-        return Ok(None);
+    let (key, cert) = (&cfg.acme_root_key, &cfg.acme_root_cert);
+    match (key.exists(), cert.exists()) {
+        (false, false) => Ok(None),
+        (true, true) => {
+            let key_pem =
+                std::fs::read_to_string(key).with_context(|| key.display().to_string())?;
+            let cert_pem =
+                std::fs::read_to_string(cert).with_context(|| cert.display().to_string())?;
+            Ok(Some(
+                Root::load(&key_pem, &cert_pem).map_err(|e| anyhow!("{}: {e}", cert.display()))?,
+            ))
+        }
+        (have_key, _) => bail!(
+            "{} exists but {} does not: restore the missing file, or move both aside to start a new root (every machine that ran `trust` would have to run it again)",
+            if have_key {
+                key.display()
+            } else {
+                cert.display()
+            },
+            if have_key {
+                cert.display()
+            } else {
+                key.display()
+            }
+        ),
     }
-    let key = std::fs::read_to_string(&cfg.acme_root_key)
-        .with_context(|| cfg.acme_root_key.display().to_string())?;
-    let cert = std::fs::read_to_string(&cfg.acme_root_cert)
-        .with_context(|| cfg.acme_root_cert.display().to_string())?;
-    Ok(Some(Root::load(&key, &cert).map_err(|e| {
-        anyhow!("{}: {e}", cfg.acme_root_cert.display())
-    })?))
 }
 
 fn directory_url(listen: SocketAddr) -> String {
@@ -95,7 +117,7 @@ pub async fn run(cmd: AcmeCmd, cfg: &Config, json: bool) -> Result<()> {
                     let (root, key_pem, cert_pem) =
                         Root::generate(&issuer.domain, now(), cfg.acme_root_validity())
                             .map_err(|e| anyhow!("root: {e}"))?;
-                    write_secret_pem(&cfg.acme_root_key, &key_pem)?;
+                    write_secret(&cfg.acme_root_key, key_pem.as_bytes())?;
                     if let Some(dir) = cfg.acme_root_cert.parent() {
                         std::fs::create_dir_all(dir)?;
                     }
@@ -114,9 +136,11 @@ pub async fn run(cmd: AcmeCmd, cfg: &Config, json: bool) -> Result<()> {
                 .ok_or_else(|| anyhow!("{}: not a domain", issuer.domain))?;
             req.validity_secs = days.map(|d| d.max(1) * 86_400).unwrap_or(cfg.ca_validity());
             let mut at = now();
-            if let Some(prev) = issued.get(&req.name)
-                && let Ok(prev) = pubpki::pubpki_core::Certificate::parse(&pubpki::core_event(prev))
-            {
+            if let Some(prev) = issued.get(&req.name) {
+                let prev = pubpki::pubpki_core::Certificate::parse(&pubpki::core_event(prev))
+                    .map_err(|e| {
+                        anyhow!("the previous {} on file does not parse: {e}", req.name)
+                    })?;
                 at = Issuer::after(&prev, at);
             }
             let ev = issuer.issue(&req, at).map_err(anyhow::Error::msg)?;
@@ -188,6 +212,29 @@ pub async fn run(cmd: AcmeCmd, cfg: &Config, json: bool) -> Result<()> {
         }
         AcmeCmd::Status => {
             let (issuer, _) = open_issuer(cfg)?;
+            if json {
+                let store = AcmeStore::new(&cfg.acme_state);
+                let (allow, _) = store.load_allowlist().map_err(anyhow::Error::msg)?;
+                let index = store.load_index().map_err(anyhow::Error::msg)?;
+                let root = root_files(cfg)?
+                    .map(|r| r.info())
+                    .transpose()
+                    .map_err(|e| anyhow!("{e}"))?;
+                let listen = cfg.acme_listen_addr().ok();
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "domain": issuer.domain,
+                        "root": root.map(|i| serde_json::json!({"subject": i.subject, "sha256": hex(&i.der_sha256), "not_after": i.not_after})),
+                        "listen": listen,
+                        "directory": listen.map(directory_url),
+                        "state": cfg.acme_state,
+                        "allowed": allow.peers,
+                        "certificates": index,
+                    }))?
+                );
+                return Ok(());
+            }
             println!("domain:     {}", issuer.domain);
             match root_files(cfg)? {
                 Some(root) => {
@@ -262,24 +309,41 @@ async fn zone_source(cfg: &Config, domain: &str) -> Result<ZoneCache> {
         eprintln!("bare-key CA: only <npub>.fips names are issued");
         return Ok(ZoneCache::new(ZoneSource::None, ttl));
     }
-    let author = cfg.acme_zone_author.or(cfg.acme_node);
     let default = Path::new("/etc/fips-pubdom/zones").join(format!("{domain}.yaml"));
-    let file = cfg
-        .acme_zone_file
-        .clone()
-        .or_else(|| default.exists().then_some(default));
-    if let Some(path) = file {
-        let author = author.ok_or_else(|| {
-            anyhow!("acme_zone_author (or acme_node) is needed to read the zone file as its server")
-        })?;
+    // An explicit file may be a copy from another node: its `self`
+    // entries mean that node, so its author must be named. The server's
+    // own default file is served by this node by construction.
+    let file = match &cfg.acme_zone_file {
+        Some(path) => Some((
+            path.clone(),
+            cfg.acme_zone_author.ok_or_else(|| {
+                anyhow!("acme_zone_file is set: acme_zone_author must name the node that serves that zone (its `self`)")
+            })?,
+        )),
+        None if default.exists() => Some((
+            default,
+            cfg.acme_zone_author.or(cfg.acme_node).ok_or_else(|| {
+                anyhow!("acme_node (or acme_zone_author) is needed to read the zone file as its server")
+            })?,
+        )),
+        None => None,
+    };
+    if let Some((path, author)) = file {
         eprintln!("zone: {} (as {author})", path.display());
         return Ok(ZoneCache::new(ZoneSource::File { path, author }, ttl));
     }
     let mut servers = cfg.acme_zone_servers.clone();
     if servers.is_empty() {
+        // The one DNS question, the issuer's: which nodes serve the
+        // domain. A denial means no zone; no answer means try again later
+        // (the unit restarts), never a silently narrower policy.
         let v = TxtVerifier::new(&cfg.upstreams, true, cfg.budget()).map_err(anyhow::Error::msg)?;
-        if let (TxtLookup::Hit { records, .. }, _) = v.lookup_service("fips-dns", domain).await {
-            servers = records.iter().map(|r| r.npub).collect();
+        match v.lookup_service(SERVICE_DNS, domain).await.0 {
+            TxtLookup::Hit { records, .. } => servers = records.iter().map(|r| r.npub).collect(),
+            TxtLookup::Miss { .. } => {}
+            other => bail!(
+                "the _fips-dns record of {domain} could not be looked up ({other:?}); set acme_zone_servers or acme_zone_file, or start again when DNS answers"
+            ),
         }
     }
     if servers.is_empty() {
@@ -304,27 +368,6 @@ async fn zone_source(cfg: &Config, domain: &str) -> Result<ZoneCache> {
         },
         ttl,
     ))
-}
-
-/// Created with its final mode, as the issuer key is.
-fn write_secret_pem(path: &Path, pem: &str) -> Result<()> {
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).with_context(|| dir.display().to_string())?;
-    }
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    use std::io::Write;
-    let mut f = opts
-        .open(path)
-        .with_context(|| path.display().to_string())?;
-    f.write_all(pem.as_bytes())?;
-    f.sync_all()?;
-    Ok(())
 }
 
 /// `fips-pubpki trust <domain> [--bundle FILE]`: the domain's `_x509`
@@ -357,24 +400,22 @@ pub async fn trust(
         }
         (path, events[0].clone())
     } else {
-        let r = v.resolve(&name, now()).await;
-        let path = match r {
-            Resolution::Verified(p) => p,
-            Resolution::Unknown => {
+        // One fetch: the events of the validated path, then validation
+        // again on exactly those events, so the hash is checked against
+        // the certificate the content belongs to.
+        let events = v.bundle_for(&name, now()).await;
+        let events = match events {
+            Ok(e) => e,
+            Err(e) => {
                 crate::finish(v).await;
                 bail!(
-                    "{domain}: no X.509 root statement found ({name}); with no relay in reach, `--bundle` takes the statement's event from a file"
+                    "{domain}: {e}; with no relay in reach, `--bundle` takes the statement's event from a file"
                 );
             }
-            other => {
-                crate::finish(v).await;
-                crate::print_resolution(&name, &other, false)?;
-                bail!("{domain}: the root statement does not verify");
-            }
         };
-        let events = v.bundle_for(&name, now()).await;
+        let r = v.verify_bundle(&events, now());
         crate::finish(v).await;
-        let events = events.map_err(anyhow::Error::msg)?;
+        let path = r.map_err(|e| anyhow!("{domain}: the root statement does not verify: {e}"))?;
         let ev = events
             .first()
             .cloned()
@@ -385,13 +426,16 @@ pub async fn trust(
     if !cert.is_x509() {
         bail!("{name}: the certificate is not an X.509 root statement (no usage x509)");
     }
+    if ev.created_at.as_secs() != cert.created_at {
+        bail!("{name}: the event in hand is not the certificate the path validated");
+    }
     let digest = cert.digest.ok_or_else(|| anyhow!("{name}: no digest"))?;
     let (info, pem) = check_root_content(&ev.content, &digest, now())
         .map_err(|e| anyhow!("{name}: the published root is not acceptable: {e}"))?;
     let directories: Vec<String> = cert
         .subjects
         .iter()
-        .map(|p| directory_url(SocketAddr::new(p.fips_address().into(), cfg.acme_port)))
+        .map(|p| directory_url(SocketAddr::new(p.fips_address().into(), DEFAULT_PORT)))
         .collect();
     if json {
         println!(

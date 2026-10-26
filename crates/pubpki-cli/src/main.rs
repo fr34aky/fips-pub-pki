@@ -427,7 +427,10 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
                 load_keys(&cfg.ca_key.display().to_string()).map_err(anyhow::Error::msg)?
             } else {
                 let keys = Keys::generate();
-                write_secret(&cfg.ca_key, &keys)?;
+                write_secret(
+                    &cfg.ca_key,
+                    format!("{}\n", keys.secret_key().to_secret_hex()).as_bytes(),
+                )?;
                 eprintln!("wrote {}", cfg.ca_key.display());
                 keys
             };
@@ -916,7 +919,9 @@ fn user_keys(cfg: &Config) -> Result<Keys> {
 
 /// The key file is created with its final mode: never readable by others,
 /// not even for an instant.
-pub(crate) fn write_secret(path: &std::path::Path, keys: &Keys) -> Result<()> {
+/// A secret file (the issuer key, the X.509 root key) created with its
+/// final mode: never readable by others, not even for an instant.
+pub(crate) fn write_secret(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| dir.display().to_string())?;
     }
@@ -930,7 +935,7 @@ pub(crate) fn write_secret(path: &std::path::Path, keys: &Keys) -> Result<()> {
     let mut f = opts
         .open(path)
         .with_context(|| path.display().to_string())?;
-    writeln!(f, "{}", keys.secret_key().to_secret_hex())?;
+    f.write_all(bytes)?;
     f.sync_all()?;
     Ok(())
 }
