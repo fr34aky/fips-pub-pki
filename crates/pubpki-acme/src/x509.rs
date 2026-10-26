@@ -270,10 +270,15 @@ pub fn issue(
     p.not_after = ts(not_after)?;
     p.serial_number = Some(SerialNumber::from_slice(&serial));
     let cert = csr.signed_by(&root.issuer()?)?;
+    // The serial as the certificate carries it (DER drops leading zero
+    // bytes), so the index, the URL and the certificate agree.
+    let (_, parsed) = parse_x509_certificate(cert.der())
+        .map_err(|e| X509Error::Root(format!("the leaf does not parse back: {e}")))?;
+    let serial = hex(parsed.raw_serial());
     Ok(Leaf {
         der: cert.der().to_vec(),
         chain_pem: format!("{}{}", cert.pem(), root.pem()),
-        serial: hex(&serial),
+        serial,
         not_before,
         not_after,
     })
@@ -425,6 +430,21 @@ mod tests {
         let (_, root_cert) = parse_x509_certificate(root.der()).unwrap();
         cert.verify_signature(Some(root_cert.public_key())).unwrap();
         assert_eq!(leaf.serial, "7f".repeat(16));
+        let zero_led = issue(
+            &root,
+            inspect_csr(&csr_for(&["www.example.org"], &leaf_key))
+                .unwrap()
+                .0,
+            &["www.example.org".to_string()],
+            NOW,
+            3600,
+            [0, 0, 0x5a, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+        )
+        .unwrap();
+        assert_eq!(
+            zero_led.serial, "5a0102030405060708090a0b0c0d",
+            "as the DER has it"
+        );
         assert!(leaf.chain_pem.starts_with("-----BEGIN CERTIFICATE-----"));
         assert_eq!(leaf.chain_pem.matches("BEGIN CERTIFICATE").count(), 2);
         assert!(

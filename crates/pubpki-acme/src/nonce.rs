@@ -3,11 +3,13 @@
 //! one `badNonce` retry, which every client does.
 
 use base64::Engine;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, Default)]
 pub struct NoncePool {
     live: HashMap<String, u64>,
+    /// Issue order, oldest first; consumed ones are skipped when met.
+    order: VecDeque<String>,
     ttl: u64,
     cap: usize,
 }
@@ -16,30 +18,31 @@ impl NoncePool {
     pub fn new(ttl: u64, cap: usize) -> Self {
         Self {
             live: HashMap::new(),
+            order: VecDeque::new(),
             ttl,
             cap: cap.max(1),
         }
     }
 
     /// A fresh nonce from `random`, valid `ttl` seconds from `now`.
-    /// Expired nonces are dropped; past `cap`, the oldest go first.
+    /// Expired nonces go first, then the oldest past `cap`; each step is
+    /// constant time, the queue is the issue order.
     pub fn issue(&mut self, now: u64, random: [u8; 16]) -> String {
-        self.live.retain(|_, issued| *issued + self.ttl > now);
-        while self.live.len() >= self.cap {
-            let oldest = self
-                .live
-                .iter()
-                .min_by_key(|(_, at)| **at)
-                .map(|(n, _)| n.clone());
-            match oldest {
-                Some(n) => {
-                    self.live.remove(&n);
+        while let Some(front) = self.order.front() {
+            match self.live.get(front) {
+                None => {
+                    self.order.pop_front();
                 }
-                None => break,
+                Some(issued) if *issued + self.ttl <= now || self.live.len() >= self.cap => {
+                    self.live.remove(front);
+                    self.order.pop_front();
+                }
+                Some(_) => break,
             }
         }
         let nonce = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random);
         self.live.insert(nonce.clone(), now);
+        self.order.push_back(nonce.clone());
         nonce
     }
 
