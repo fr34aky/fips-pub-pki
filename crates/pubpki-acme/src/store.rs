@@ -1,7 +1,10 @@
 //! The ACME state directory, `/var/lib/fips-pubpki/acme/`: the
 //! allowlist, accounts, orders, the certificate index and the chains.
 //! Plain JSON, written atomically like the verifier's file; nonces
-//! live in memory.
+//! live in memory. Every method is a whole-file load or save: the
+//! server keeps the live tables under one lock and saves from there, and
+//! the CLI's `acme allow|deny` is the only other writer (of the
+//! allowlist alone, which the server re-reads by mtime).
 
 use crate::policy::{Account, Allowlist, CertEntry, Order};
 use pubpki::store::write_atomic;

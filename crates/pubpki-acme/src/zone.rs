@@ -68,12 +68,17 @@ pub enum ZoneSource {
     None,
 }
 
-/// The zone, cached: a file by mtime, relays for `ttl` seconds.
+/// The zone, cached: a file by mtime (a `metadata` call per lookup and a
+/// read when it changed; the file is small and the server's traffic
+/// tiny, so this stays on the request path), relays for `ttl` seconds
+/// with a high-water mark, so a relay serving an older record after a
+/// newer one was seen cannot roll the policy back.
 pub struct ZoneCache {
     source: ZoneSource,
     ttl: u64,
     cached: Option<(u64, Option<ZoneRecord>)>,
     mtime: Option<SystemTime>,
+    newest_seen: u64,
 }
 
 impl ZoneCache {
@@ -83,6 +88,29 @@ impl ZoneCache {
             ttl,
             cached: None,
             mtime: None,
+            newest_seen: 0,
+        }
+    }
+
+    /// What a relay fetch yielded, folded into the cache with the
+    /// high-water mark: the newest record not older than what was seen,
+    /// else what was in hand. Separated from the fetch so it is testable.
+    fn take_fetched(&mut self, fetched: Vec<ZoneRecord>, now: u64) -> Option<ZoneRecord> {
+        let newest = fetched
+            .into_iter()
+            .filter(|z| z.created_at >= self.newest_seen)
+            .max_by_key(|z| z.created_at);
+        match newest {
+            Some(z) => {
+                self.newest_seen = z.created_at;
+                self.cached = Some((now, Some(z.clone())));
+                Some(z)
+            }
+            None => {
+                let kept = self.cached.as_ref().and_then(|(_, z)| z.clone());
+                self.cached = Some((now, kept.clone()));
+                kept
+            }
         }
     }
 
@@ -101,7 +129,11 @@ impl ZoneCache {
                 }
                 let z = match std::fs::read_to_string(path) {
                     Ok(text) => match parse_zone_file(&text, *author) {
-                        Ok(z) => Some(z),
+                        Ok(z) if z.domain == domain => Some(z),
+                        Ok(z) => {
+                            tracing::error!(path = %path.display(), file_domain = %z.domain, domain, "zone file is for another domain; only .fips names are approved");
+                            None
+                        }
                         Err(e) => {
                             tracing::error!(path = %path.display(), %e, "zone file not parsed; only .fips names are approved");
                             None
@@ -122,7 +154,7 @@ impl ZoneCache {
                 {
                     return z.clone();
                 }
-                let mut newest: Option<ZoneRecord> = None;
+                let mut fetched = Vec::new();
                 for server in servers {
                     for ev in client.fetch_zone(domain, server, RelayScope::Offline).await {
                         let Ok(z) = ZoneRecord::parse(&ev) else {
@@ -134,19 +166,17 @@ impl ZoneCache {
                         {
                             continue;
                         }
-                        if newest.as_ref().is_none_or(|n| n.created_at < z.created_at) {
-                            newest = Some(z);
-                        }
+                        fetched.push(z);
                     }
                 }
-                if newest.is_none() {
+                let z = self.take_fetched(fetched, now);
+                if z.is_none() {
                     tracing::warn!(
                         domain,
                         "no zone record from the domain's servers; only .fips names are approved"
                     );
                 }
-                self.cached = Some((now, newest.clone()));
-                newest
+                z
             }
         }
     }
@@ -227,8 +257,60 @@ mod tests {
             cache.get("example.org", 3).await.is_none(),
             "a broken file approves nothing beyond .fips"
         );
+        std::fs::write(&path, "domain: example.net\nnames:\n  www: self\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(now + std::time::Duration::from_secs(6))
+            .unwrap();
+        assert!(
+            cache.get("example.org", 4).await.is_none(),
+            "another domain's zone is not this domain's"
+        );
         let _ = std::fs::remove_dir_all(&dir);
         let mut none = ZoneCache::new(ZoneSource::None, 300);
         assert!(none.get("example.org", 1).await.is_none());
+    }
+
+    #[test]
+    fn relay_records_never_roll_the_zone_back() {
+        let rec = |created_at: u64, target: Target| ZoneRecord {
+            author: key(9),
+            domain: "example.org".into(),
+            created_at,
+            names: vec![("www".into(), target)],
+        };
+        let mut cache = ZoneCache::new(ZoneSource::None, 300);
+        let v1 = rec(100, Target::Node(key(1)));
+        let v2 = rec(200, Target::Node(key(2)));
+        assert_eq!(
+            cache
+                .take_fetched(vec![v1.clone(), v2.clone()], 1000)
+                .unwrap()
+                .lookup("www"),
+            Some(key(2))
+        );
+        // A relay still holding v1 after v2 was seen changes nothing.
+        assert_eq!(
+            cache
+                .take_fetched(vec![v1.clone()], 1400)
+                .unwrap()
+                .lookup("www"),
+            Some(key(2))
+        );
+        assert_eq!(
+            cache.take_fetched(vec![], 1800).unwrap().lookup("www"),
+            Some(key(2)),
+            "nothing fetched: what is in hand stays"
+        );
+        let v3 = rec(300, Target::Legacy);
+        assert_eq!(
+            cache
+                .take_fetched(vec![v1, v3], 2200)
+                .unwrap()
+                .lookup("www"),
+            None
+        );
     }
 }

@@ -39,7 +39,12 @@ are for the issuer tooling (the `ca` commands), which comes next.
 ### pubpki-acme
 
 Desktop only, outside the portability checks: the ACME server for TLS
-certificates on the mesh (spec §8a, docs/acme.md when it lands).
+certificates on the mesh (spec §8a, docs/acme.md when it lands). The
+policy's premise is that a `fd…` source address was authenticated by the
+mesh; that holds only for connections that arrived over the fips
+interface, so the server (next PR) binds the node's fips address and,
+on Linux, the interface itself, and the service is never to sit behind
+a proxy or a host route from another interface.
 
 | module | what |
 |---|---|

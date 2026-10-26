@@ -1797,7 +1797,6 @@ name = "pubpki-acme"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "ecdsa",
  "ed25519-dalek",
  "num-bigint-dig",
  "p256",

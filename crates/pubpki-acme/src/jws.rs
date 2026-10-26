@@ -81,19 +81,16 @@ pub fn parse(body: &[u8]) -> Result<(Flattened, Protected), JwsError> {
     if raw.get("crit").is_some() {
         return Err(JwsError::Malformed("crit is not supported"));
     }
-    if raw.get("alg").and_then(|a| a.as_str()).is_none() {
-        return Err(JwsError::Malformed("no alg"));
+    let alg = raw
+        .get("alg")
+        .and_then(|a| a.as_str())
+        .ok_or(JwsError::Malformed("no alg"))?;
+    if serde_json::from_value::<Alg>(serde_json::Value::String(alg.to_string())).is_err() {
+        // Known shape, unknown algorithm: §6.2 wants that named.
+        return Err(JwsError::BadSignatureAlgorithm);
     }
-    let p: Protected = match serde_json::from_value(raw.clone()) {
-        Ok(p) => p,
-        Err(_) => {
-            // Everything else present but the alg unknown: say so (§6.2).
-            if raw.get("nonce").is_some() && raw.get("url").is_some() {
-                return Err(JwsError::BadSignatureAlgorithm);
-            }
-            return Err(JwsError::Malformed("protected header lacks nonce or url"));
-        }
-    };
+    let p: Protected = serde_json::from_value(raw)
+        .map_err(|_| JwsError::Malformed("protected header: nonce, url, jwk or kid"))?;
     match (&p.jwk, &p.kid) {
         (Some(_), Some(_)) => return Err(JwsError::JwkAndKid),
         (None, None) => return Err(JwsError::NeitherJwkNorKid),
@@ -350,6 +347,25 @@ mod tests {
         let crit = serde_json::json!({"alg":"ES256","nonce":"n","url":"u","kid":"k","crit":["x"]});
         assert!(matches!(
             parse(&flattened(&crit, b"", sign)),
+            Err(JwsError::Malformed(_))
+        ));
+        let oct =
+            serde_json::json!({"alg":"ES256","nonce":"n","url":"u","jwk":{"kty":"oct","k":"x"}});
+        assert!(
+            matches!(
+                parse(&flattened(&oct, b"", sign)),
+                Err(JwsError::Malformed(_))
+            ),
+            "a key type we do not take is malformed, not a bad algorithm"
+        );
+        let no_y = serde_json::json!({"alg":"ES256","nonce":"n","url":"u","jwk":{"kty":"EC","crv":"P-256","x":"x"}});
+        assert!(matches!(
+            parse(&flattened(&no_y, b"", sign)),
+            Err(JwsError::Malformed(_))
+        ));
+        let num_nonce = serde_json::json!({"alg":"ES256","nonce":5,"url":"u","kid":"k"});
+        assert!(matches!(
+            parse(&flattened(&num_nonce, b"", sign)),
             Err(JwsError::Malformed(_))
         ));
         let no_url = serde_json::json!({"alg":"ES256","nonce":"n","kid":"k"});

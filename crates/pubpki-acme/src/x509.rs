@@ -245,8 +245,11 @@ pub fn issue(
     {
         return Err(X509Error::Root("a name is not a DNS name".into()));
     }
+    // A common name only when X.520's 64-character bound allows it; an
+    // overlay name (`<npub>.fips`, 68 characters) does not fit, and the
+    // SANs carry the names anyway.
     let mut dn = DistinguishedName::new();
-    if let Some(first) = names.first() {
+    if let Some(first) = names.iter().find(|n| n.len() <= 64) {
         dn.push(DnType::CommonName, first.clone());
     }
     p.distinguished_name = dn;
@@ -429,6 +432,33 @@ mod tests {
                 .iter()
                 .any(|e| e.oid == x509_parser::oid_registry::OID_X509_EXT_AUTHORITY_KEY_IDENTIFIER)
         );
+        // A bare-key node's only name is 68 characters: no CN, SAN alone.
+        let overlay = pubpki_core::pubdom_core::Npub::from_bytes([5; 32]).fips_name();
+        let (csr, _) = inspect_csr(&csr_for(&[&overlay], &leaf_key)).unwrap();
+        let leaf = issue(
+            &root,
+            csr,
+            std::slice::from_ref(&overlay),
+            NOW,
+            3600,
+            [2; 16],
+        )
+        .unwrap();
+        let (_, cert) = parse_x509_certificate(&leaf.der).unwrap();
+        assert!(cert.subject().iter_common_name().next().is_none());
+        let sans: Vec<String> = cert
+            .subject_alternative_name()
+            .unwrap()
+            .unwrap()
+            .value
+            .general_names
+            .iter()
+            .filter_map(|g| match g {
+                GeneralName::DNSName(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sans, [overlay]);
     }
 
     #[test]

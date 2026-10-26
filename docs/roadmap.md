@@ -60,6 +60,12 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
 
 ## Later
 
+- **One zone-file parser.** `pubpki_acme::zone::parse_zone_file` mirrors
+  fips-pubdom-server's private parser; a change there (a new target
+  form, a new key) would make the two disagree. The parser belongs in
+  `pubdom-core` as a PR to fips-pub-domains, with the server calling it
+  and the pin bumped here, when fips-pub-domains next changes.
+
 - **Enrolment requests** (ACME's model, over Nostr and fips only): a
   signed request event from the subject — proof of key possession, as
   ACME's key authorization — naming the wanted `d` and keys, gift-wrapped

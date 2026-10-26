@@ -80,6 +80,10 @@ pub fn is_mesh(ip: &IpAddr) -> bool {
 }
 
 /// The mesh authenticates the source address; this only looks it up.
+/// The listener must accept connections from the fips interface alone
+/// (the server binds the node's fips address and, on Linux, the
+/// interface; a host route or a proxy in front would defeat it), or a
+/// spoofed `fd…` source on another interface would pass here.
 /// `override_` names whom a loopback peer counts as, for tests on a
 /// loopback listener and nowhere else.
 pub fn peer_of(ip: IpAddr, table: &HashMap<Ipv6Addr, Npub>, override_: Option<Npub>) -> Peer {
@@ -121,6 +125,17 @@ impl Why {
     }
 }
 
+/// Why an order was refused as a whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refused {
+    /// RFC 8555 §7.4: at least one identifier.
+    NoIdentifiers,
+    TooMany(usize),
+    /// One or more identifiers, each with its reason; the rest are not
+    /// issued either (no partial orders).
+    Identifiers(Vec<(Identifier, Why)>),
+}
+
 /// Approve every identifier or refuse the order (RFC 8555 §7.4: no
 /// partial orders). `<peer>.fips` always; a name under `ca_domain` when
 /// the zone maps its label to the peer. The approved names are
@@ -130,10 +145,16 @@ pub fn approve(
     peer: Npub,
     ca_domain: &str,
     zone: Option<&ZoneRecord>,
-) -> Result<Vec<String>, Vec<(Identifier, Why)>> {
+) -> Result<Vec<String>, Refused> {
+    if ids.is_empty() {
+        return Err(Refused::NoIdentifiers);
+    }
+    if ids.len() > MAX_IDENTIFIERS {
+        return Err(Refused::TooMany(ids.len()));
+    }
     let mut names: Vec<String> = Vec::new();
     let mut refused = Vec::new();
-    for id in ids.iter().take(MAX_IDENTIFIERS) {
+    for id in ids {
         let raw = id.value();
         if raw.starts_with("*.") {
             refused.push((id.clone(), Why::Wildcard));
@@ -167,30 +188,34 @@ pub fn approve(
             Err(why) => refused.push((id.clone(), why)),
         }
     }
-    if ids.len() > MAX_IDENTIFIERS {
-        for id in &ids[MAX_IDENTIFIERS..] {
-            refused.push((id.clone(), Why::NotAHostname));
-        }
-    }
     if refused.is_empty() {
         Ok(names)
     } else {
-        Err(refused)
+        Err(Refused::Identifiers(refused))
     }
 }
 
-/// The `rejectedIdentifier` problem for what [`approve`] refused.
-pub fn rejected(refused: &[(Identifier, Why)]) -> Problem {
-    Problem::rejected(
-        refused
-            .iter()
-            .map(|(id, why)| Subproblem {
-                kind: ErrorType::RejectedIdentifier,
-                detail: why.detail(),
-                identifier: Some(id.clone()),
-            })
-            .collect(),
-    )
+/// The problem document for what [`approve`] refused.
+pub fn rejected(refused: &Refused) -> Problem {
+    match refused {
+        Refused::NoIdentifiers => Problem::new(
+            ErrorType::Malformed,
+            "an order needs at least one identifier",
+        ),
+        Refused::TooMany(n) => Problem::new(
+            ErrorType::Malformed,
+            format!("{n} identifiers; at most {MAX_IDENTIFIERS}"),
+        ),
+        Refused::Identifiers(list) => Problem::rejected(
+            list.iter()
+                .map(|(id, why)| Subproblem {
+                    kind: ErrorType::RejectedIdentifier,
+                    detail: why.detail(),
+                    identifier: Some(id.clone()),
+                })
+                .collect(),
+        ),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -513,6 +538,9 @@ mod tests {
             Some(&z),
         )
         .unwrap_err();
+        let Refused::Identifiers(refused) = refused else {
+            panic!("per identifier");
+        };
         let whys: Vec<(String, Why)> = refused
             .iter()
             .map(|(i, w)| (i.value().to_string(), w.clone()))
@@ -559,15 +587,24 @@ mod tests {
         // No zone: only the overlay name.
         assert!(approve(&[dns(&peer.fips_name())], peer, "example.org", None).is_ok());
         assert_eq!(
-            approve(&[dns("www.example.org")], peer, "example.org", None).unwrap_err()[0].1,
-            Why::NotInZone
+            approve(&[dns("www.example.org")], peer, "example.org", None).unwrap_err(),
+            Refused::Identifiers(vec![(dns("www.example.org"), Why::NotInZone)])
         );
-        // Too many.
+        // None, and too many.
+        assert_eq!(
+            approve(&[], peer, "example.org", Some(&wild)).unwrap_err(),
+            Refused::NoIdentifiers
+        );
         let many: Vec<Identifier> = (0..MAX_IDENTIFIERS + 1)
             .map(|i| dns(&format!("n{i}.example.org")))
             .collect();
-        assert!(approve(&many, peer, "example.org", Some(&wild)).is_err());
-        let p = rejected(&refused);
+        assert_eq!(
+            approve(&many, peer, "example.org", Some(&wild)).unwrap_err(),
+            Refused::TooMany(MAX_IDENTIFIERS + 1)
+        );
+        assert_eq!(rejected(&Refused::NoIdentifiers).kind, ErrorType::Malformed);
+        assert_eq!(rejected(&Refused::TooMany(17)).status, 400);
+        let p = rejected(&Refused::Identifiers(refused));
         assert_eq!(p.status, 403);
         assert_eq!(p.subproblems.len(), 9);
     }
