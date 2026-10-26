@@ -524,6 +524,8 @@ mod tests {
             revoked: None,
             pathlen: None,
             relays: Vec::new(),
+            other_usages: Vec::new(),
+            digest: None,
             created_at: NOW - DAY,
         }
     }

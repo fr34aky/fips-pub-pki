@@ -68,6 +68,8 @@ mod tests {
             revoked: None,
             pathlen: None,
             relays: Vec::new(),
+            other_usages: Vec::new(),
+            digest: None,
             created_at: 0,
         };
         let ev = sign_event(&keys, KIND_CERT, cert.tags(), "").unwrap();

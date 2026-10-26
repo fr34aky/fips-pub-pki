@@ -497,12 +497,12 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
                 // same file while the loop runs.
                 let mut issued = Issued::load(&cfg.ca_issued).map_err(anyhow::Error::msg)?;
                 let t = now();
-                let due: Vec<Certificate> = issued
+                let due: Vec<(Certificate, Event)> = issued
                     .certificates()
                     .into_iter()
-                    .map(|(c, _)| c)
-                    .filter(|c| c.revoked.is_none() && c.issuer == issuer.npub())
-                    .filter(|c| match &only {
+                    .map(|(c, ev)| (c, ev.clone()))
+                    .filter(|(c, _)| c.revoked.is_none() && c.issuer == issuer.npub())
+                    .filter(|(c, _)| match &only {
                         Some(n) => &c.name == n,
                         None => force || renewable(c, t),
                     })
@@ -513,8 +513,8 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
                     bail!("{n}: nothing live to renew");
                 }
                 let mut events = Vec::new();
-                for c in &due {
-                    events.push(issuer.renew(c, t).map_err(anyhow::Error::msg)?);
+                for (_, ev) in &due {
+                    events.push(issuer.renew(ev, t).map_err(anyhow::Error::msg)?);
                 }
                 let r = if !events.is_empty() {
                     record_and_publish(cfg, &mut issued, &events, no_publish, json).await
@@ -565,7 +565,7 @@ async fn ca(cmd: CaCmd, cfg: &Config, json: bool) -> Result<()> {
                 bail!("{name}: already revoked");
             }
             let marker = issuer
-                .revoke(&cert, &reason, now())
+                .revoke(ev, &reason, now())
                 .map_err(anyhow::Error::msg)?;
             record_and_publish(cfg, &mut issued, &[marker], no_publish, json).await?;
         }

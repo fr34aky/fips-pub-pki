@@ -154,6 +154,10 @@ pub struct Request {
     pub validity_secs: u64,
     pub pathlen: Option<u32>,
     pub relays: Vec<String>,
+    /// The event's content: empty, display fields, or the base64 DER of
+    /// an X.509 root (`usage x509`, with `digest` its SHA-256).
+    pub content: String,
+    pub digest: Option<[u8; 32]>,
 }
 
 impl Request {
@@ -165,7 +169,21 @@ impl Request {
             validity_secs: pubpki_core::DEFAULT_VALIDITY_SECS,
             pathlen: None,
             relays: Vec::new(),
+            content: String::new(),
+            digest: None,
         }
+    }
+
+    /// The X.509 root statement for `domain`: `_x509@<domain>`, the DER
+    /// base64 in the content, its SHA-256 in the `x` tag, the operating
+    /// nodes as subjects.
+    pub fn x509_root(domain: &str, nodes: Vec<Npub>, der: &[u8]) -> Option<Self> {
+        use base64::Engine;
+        let mut req = Self::new(Name::x509(domain)?, nodes);
+        req.usages = vec![Usage::X509];
+        req.content = base64::engine::general_purpose::STANDARD.encode(der);
+        req.digest = Some(pubpki_core::sig::digest(der));
+        Some(req)
     }
 }
 
@@ -231,6 +249,23 @@ impl Issuer {
                 req.name.domain
             ));
         }
+        if req.name.is_x509() != req.usages.contains(&Usage::X509) {
+            return Err(format!(
+                "usage x509 and the name _x509@{} go together",
+                req.name.domain
+            ));
+        }
+        if req.name.is_x509() && (req.digest.is_none() || req.content.is_empty()) {
+            return Err(
+                "the X.509 root statement needs the DER in the content and its digest".into(),
+            );
+        }
+        if req.name.is_reserved() && !req.name.is_apex() && !req.name.is_x509() {
+            return Err(format!(
+                "{}: local parts starting with _ are reserved for the domain's own statements",
+                req.name
+            ));
+        }
         if req.pathlen.is_some() && !req.usages.contains(&Usage::Ca) {
             return Err("pathlen needs usage ca".into());
         }
@@ -246,9 +281,11 @@ impl Issuer {
             revoked: None,
             pathlen: req.pathlen,
             relays: req.relays.clone(),
+            other_usages: Vec::new(),
+            digest: req.digest,
             created_at: now,
         };
-        sign_at(&self.keys, KIND_CERT, cert.tags(), "", now)
+        sign_at(&self.keys, KIND_CERT, cert.tags(), &req.content, now)
     }
 
     /// A timestamp after `prev`'s: `now`, or one second later than `prev`
@@ -258,9 +295,11 @@ impl Issuer {
         now.max(prev.created_at + 1)
     }
 
-    /// Renew `cert`: the same tags, a fresh validity of the same length,
-    /// dated after it.
-    pub fn renew(&self, cert: &Certificate, now: u64) -> Result<Event, String> {
+    /// Renew the certificate event `ev`: the same tags and content, a
+    /// fresh validity of the same length, dated after it. The content
+    /// travels along, so an X.509 root statement keeps its DER.
+    pub fn renew(&self, ev: &Event, now: u64) -> Result<Event, String> {
+        let cert = Certificate::parse(&crate::core_event(ev)).map_err(|e| e.to_string())?;
         if cert.issuer != self.npub() {
             return Err("not this issuer's certificate".into());
         }
@@ -271,16 +310,18 @@ impl Issuer {
             ));
         }
         let length = cert.expiration.saturating_sub(cert.created_at).max(60);
-        let at = Self::after(cert, now);
+        let at = Self::after(&cert, now);
         let mut fresh = cert.clone();
         fresh.expiration = at + length;
         fresh.created_at = at;
-        sign_at(&self.keys, KIND_CERT, fresh.tags(), "", at)
+        sign_at(&self.keys, KIND_CERT, fresh.tags(), &ev.content, at)
     }
 
-    /// The revocation marker for `cert`: same name, same keys, the same
-    /// expiration, `revoked` with `reason`, dated after it.
-    pub fn revoke(&self, cert: &Certificate, reason: &str, now: u64) -> Result<Event, String> {
+    /// The revocation marker for the certificate event `ev`: same name,
+    /// same keys, same content, the same expiration, `revoked` with
+    /// `reason`, dated after it.
+    pub fn revoke(&self, ev: &Event, reason: &str, now: u64) -> Result<Event, String> {
+        let cert = Certificate::parse(&crate::core_event(ev)).map_err(|e| e.to_string())?;
         if cert.issuer != self.npub() {
             return Err("not this issuer's certificate".into());
         }
@@ -290,8 +331,8 @@ impl Issuer {
             &self.keys,
             KIND_CERT,
             marker.tags(),
-            "",
-            Self::after(cert, now),
+            &ev.content,
+            Self::after(&cert, now),
         )
     }
 
@@ -472,37 +513,81 @@ mod tests {
         let c = Certificate::parse(&crate::core_event(&ev)).unwrap();
         assert_eq!(c.created_at, t0, "dated as asked, not at the clock");
         assert_eq!(c.expiration, t0 + 7200);
-        let renewed =
-            Certificate::parse(&crate::core_event(&issuer.renew(&c, now()).unwrap())).unwrap();
+        let renewed_ev = issuer.renew(&ev, now()).unwrap();
+        let renewed = Certificate::parse(&crate::core_event(&renewed_ev)).unwrap();
         assert_eq!(renewed.subjects, c.subjects);
         assert_eq!(renewed.expiration - renewed.created_at, 7200, "same length");
         assert!(renewed.created_at > c.created_at);
         // Renewing twice within one second still moves forward.
         let again = Certificate::parse(&crate::core_event(
-            &issuer.renew(&renewed, renewed.created_at).unwrap(),
+            &issuer.renew(&renewed_ev, renewed.created_at).unwrap(),
         ))
         .unwrap();
         assert_eq!(again.created_at, renewed.created_at + 1);
-        let marker = Certificate::parse(&crate::core_event(
-            &issuer.revoke(&c, "lost phone", c.created_at).unwrap(),
-        ))
-        .unwrap();
+        let marker_ev = issuer.revoke(&ev, "lost phone", c.created_at).unwrap();
+        let marker = Certificate::parse(&crate::core_event(&marker_ev)).unwrap();
         assert_eq!(marker.created_at, c.created_at + 1, "after what it revokes");
         assert_eq!(marker.revoked.as_deref(), Some("lost phone"));
         assert_eq!(marker.expiration, c.expiration);
         assert_eq!(marker.subjects, c.subjects);
         assert!(
-            issuer.renew(&marker, now()).is_err(),
+            issuer.renew(&marker_ev, now()).is_err(),
             "a marker is not renewed"
         );
         let other = Issuer::new(Keys::generate(), None).unwrap();
-        assert!(other.revoke(&c, "x", now()).is_err());
+        assert!(other.revoke(&ev, "x", now()).is_err());
         // The marker, learnt, refuses the certificate.
         let mut certs = Certs::new();
         certs.insert(marker, now()).unwrap();
         assert_eq!(
             validate(&certs, &Anchors::new(), &c, now()),
             Err(PathError::Revoked("lost phone".into()))
+        );
+    }
+
+    #[test]
+    fn the_x509_root_statement_keeps_its_der_through_renewal_and_revocation() {
+        let issuer = Issuer::new(Keys::generate(), Some("example.org")).unwrap();
+        let node = Npub::from_bytes([7; 32]);
+        let der = b"not really DER, but bytes";
+        let req = Request::x509_root("example.org", vec![node], der).unwrap();
+        let ev = issuer.issue(&req, now()).unwrap();
+        ev.verify().unwrap();
+        let c = Certificate::parse(&crate::core_event(&ev)).unwrap();
+        assert!(c.is_x509());
+        assert_eq!(c.digest, Some(pubpki_core::sig::digest(der)));
+        assert_eq!(c.subjects, vec![node]);
+        assert!(!ev.content.is_empty());
+        let renewed = issuer.renew(&ev, now() + 10).unwrap();
+        assert_eq!(renewed.content, ev.content, "the DER survives renewal");
+        let rc = Certificate::parse(&crate::core_event(&renewed)).unwrap();
+        assert_eq!(rc.digest, c.digest);
+        let marker = issuer.revoke(&ev, "rotated", now() + 10).unwrap();
+        assert_eq!(marker.content, ev.content);
+        // The pieces go together or not at all.
+        let mut no_usage = req.clone();
+        no_usage.usages.clear();
+        assert!(
+            issuer.issue(&no_usage, now()).is_err(),
+            "_x509 without usage x509"
+        );
+        let mut elsewhere = req.clone();
+        elsewhere.name = Name::parse("_@example.org").unwrap();
+        assert!(
+            issuer.issue(&elsewhere, now()).is_err(),
+            "usage x509 off its name"
+        );
+        let mut no_der = req.clone();
+        no_der.content.clear();
+        assert!(issuer.issue(&no_der, now()).is_err());
+        let mut other_reserved = Request::new(Name::parse("_foo@example.org").unwrap(), vec![node]);
+        other_reserved.validity_secs = 3600;
+        assert!(issuer.issue(&other_reserved, now()).is_err(), "reserved");
+        assert!(
+            Request::x509_root("org", vec![node], der).is_none()
+                || issuer
+                    .issue(&Request::x509_root("org", vec![node], der).unwrap(), now())
+                    .is_err()
         );
     }
 
@@ -529,8 +614,7 @@ mod tests {
         assert_eq!(issued.pending(now()).len(), 3);
         issued.mark_published(&b.id.to_hex());
         assert_eq!(issued.pending(now()).len(), 2);
-        let c = Certificate::parse(&crate::core_event(&a)).unwrap();
-        let renewed = issuer.renew(&c, now()).unwrap();
+        let renewed = issuer.renew(&a, now()).unwrap();
         assert!(issued.put(renewed.clone()));
         assert_eq!(issued.events.len(), 3);
         assert!(

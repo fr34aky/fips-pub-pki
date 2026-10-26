@@ -17,6 +17,7 @@ nostr-sdk = { version = "0.44", default-features = false, features = ["nip44"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
+base64 = "0.22"
 thiserror.workspace = true
 # The timer only, for publishing with a deadline; pubdom-resolve brings
 # the same tokio already.

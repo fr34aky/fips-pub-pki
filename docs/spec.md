@@ -72,8 +72,16 @@ Names: `<local>@<domain>`, `local` in `a-z0-9-_.` (≤ 64), `_` the apex;
 domain normalized as NIP-DB's (`pubpki_core::Name`). Certificates: kind
 37200 as nip.md, parsed by `pubpki_core::Certificate` with the limits
 `MAX_TAGS` (300), `MAX_SUBJECTS` (16), `MAX_RELAY_HINTS` (8). `d` must be
-canonical. Absent `usage` means `sign` and `encrypt`; `ca` is never
-implied, and only on an apex certificate makes a sub-issuer.
+canonical. No `usage` tag at all means `sign` and `encrypt`; a value
+the client does not know is kept (`other_usages`) and counts as a usage,
+so a certificate whose usages are all unknown allows nothing
+(`allows`); `ca` and `x509` are never implied; `ca` only on an apex
+certificate makes a sub-issuer. The `x` tag is the SHA-256 of the
+event's content (`digest`), required with `usage x509`. Local parts
+starting with `_` are reserved (`Name::is_reserved`): `_` the apex,
+`_x509` the X.509 root statement (`Name::x509`); the issuer refuses any
+other (`Issuer::issue`). `Issuer::renew` and `revoke` take the event and
+carry its content, so a root statement keeps its DER through renewal.
 
 ## 4. Path validation
 
@@ -214,6 +222,18 @@ As implemented: `pubpki::sig::sign_detached` writes `x`, the optional
 the event signature, then `Signature::covers` (hash, and size if stated).
 `pubpki::crypto::encrypt`/`decrypt` wrap nostr-sdk's NIP-44 v2 for one
 recipient key.
+
+## 8a. The X.509 bridge
+
+TLS for services on the overlay (docs/acme.md, in progress) needs an
+X.509 root that clients can trust. The root is the domain's statement:
+a certificate for `_x509@<domain>`, `usage x509`, the root's DER base64
+in the content, its SHA-256 in `x`, the operating nodes as `p`
+(`Request::x509_root`). It is validated like any certificate (§4); a
+client then checks the digest, parses the DER, requires a self-signed CA
+certificate, and exports the PEM. The X.509 key is separate from the
+Nostr issuer key (browsers do not accept secp256k1), so compromise of
+one does not cost the other.
 
 ## 9. Privacy
 

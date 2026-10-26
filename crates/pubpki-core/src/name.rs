@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 /// Longest local part accepted (NIP-05 gives no bound; mailboxes stop at
 /// 64).
 pub const MAX_LOCAL: usize = 64;
+/// The reserved local part of the X.509 root statement.
+pub const X509_LOCAL: &str = "_x509";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Name {
@@ -49,6 +51,24 @@ impl Name {
 
     pub fn is_apex(&self) -> bool {
         self.local == "_"
+    }
+
+    /// Local parts starting with `_` are the domain's own statements, not
+    /// people: `_` the domain itself, `_x509` its X.509 root.
+    pub fn is_reserved(&self) -> bool {
+        self.local.starts_with('_')
+    }
+
+    /// The domain's X.509 root statement: `_x509@<domain>`.
+    pub fn x509(domain: &str) -> Option<Self> {
+        Some(Self {
+            local: X509_LOCAL.into(),
+            domain: normalize(domain)?,
+        })
+    }
+
+    pub fn is_x509(&self) -> bool {
+        self.local == X509_LOCAL
     }
 
     /// `<npub>.fips`: a bare key on the overlay is its own issuer.
@@ -99,6 +119,12 @@ mod tests {
             "_@example.org"
         );
         assert!(Name::apex("example.org").unwrap().is_apex());
+        let x = Name::x509("Example.org").unwrap();
+        assert_eq!(x.to_string(), "_x509@example.org");
+        assert!(x.is_x509() && x.is_reserved() && !x.is_apex());
+        assert!(Name::apex("example.org").unwrap().is_reserved());
+        assert!(!n.is_reserved());
+        assert!(Name::parse("_service@example.org").unwrap().is_reserved());
         assert_eq!(
             Name::parse(&format!("{}@example.org", "a".repeat(64))).map(|n| n.local.len()),
             Some(64)
