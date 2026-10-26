@@ -484,11 +484,15 @@ pub fn resolve(certs: &Certs, anchors: &Anchors, name: &Name, now: u64) -> Resol
 }
 
 /// The names `key` validly holds at `now`: every certificate naming it as
-/// a subject that validates. Disputes are not resolved here; a caller
-/// that needs the name → key direction uses [`resolve`] on each name.
+/// a subject that validates, the domain's own statements aside: a
+/// reserved name other than the apex (`_x509@…`) is the domain speaking
+/// about itself, never a name the key holds (nip.md "Reserved names").
+/// Disputes are not resolved here; a caller that needs the name → key
+/// direction uses [`resolve`] on each name.
 pub fn names_of(certs: &Certs, anchors: &Anchors, key: &Npub, now: u64) -> Vec<Path> {
     let mut out: Vec<Path> = certs
         .by_subject(key)
+        .filter(|c| !c.name.is_reserved() || c.name.is_apex())
         .filter_map(|c| validate(certs, anchors, c, now).ok())
         .collect();
     out.sort_by_key(|p| p.cert().name.to_string());
@@ -524,6 +528,8 @@ mod tests {
             revoked: None,
             pathlen: None,
             relays: Vec::new(),
+            other_usages: Vec::new(),
+            digest: None,
             created_at: NOW - DAY,
         }
     }
@@ -1062,15 +1068,22 @@ mod tests {
         let mut alt = cert(ONLINE, "a.smith@example.org", ALICE);
         alt.subjects.push(key(8));
         let forged = cert(EVIL, "root@example.org", ALICE);
-        let (certs, anchors) = world(&[root_ca, alice, alt, forged]);
+        let mut statement = cert(ROOT, "_x509@example.org", ALICE);
+        statement.usages = vec![Usage::X509];
+        statement.digest = Some([1; 32]);
+        let (certs, anchors) = world(&[root_ca, alice, alt, forged, statement]);
         let found: Vec<String> = names_of(&certs, &anchors, &key(ALICE), NOW)
             .iter()
             .map(|p| p.cert().name.to_string())
             .collect();
-        assert_eq!(found, ["a.smith@example.org", "alice@example.org"]);
+        assert_eq!(
+            found,
+            ["a.smith@example.org", "alice@example.org"],
+            "the domain's statement about its X.509 root is not a name the key holds"
+        );
         assert_eq!(names_of(&certs, &anchors, &key(8), NOW).len(), 1);
         assert!(names_of(&certs, &anchors, &key(BOB), NOW).is_empty());
-        assert_eq!(certs.by_subject(&key(ALICE)).count(), 3);
-        assert_eq!(certs.len(), 4);
+        assert_eq!(certs.by_subject(&key(ALICE)).count(), 4);
+        assert_eq!(certs.len(), 5);
     }
 }

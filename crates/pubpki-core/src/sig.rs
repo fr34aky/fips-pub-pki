@@ -51,8 +51,7 @@ impl Signature {
         }
         let signer = Npub::from_hex(&ev.pubkey).map_err(|_| SigError::Signer)?;
         let x = tag(&ev.tags, "x").ok_or(SigError::Digest)?;
-        let bytes = hex_decode(x).ok_or(SigError::Digest)?;
-        let digest: [u8; 32] = bytes.try_into().map_err(|_| SigError::Digest)?;
+        let digest = hex_digest(x).ok_or(SigError::Digest)?;
         let size = match tag(&ev.tags, "size") {
             Some(v) => Some(v.parse::<u64>().map_err(|_| SigError::Size)?),
             None => None,
@@ -91,7 +90,12 @@ fn tag<'a>(tags: &'a [Vec<String>], name: &str) -> Option<&'a str> {
         .map(|t| t[1].as_str())
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+/// A 32-byte digest from its hex, as the `x` tag carries it.
+pub fn hex_digest(s: &str) -> Option<[u8; 32]> {
+    hex_decode(s)?.try_into().ok()
+}
+
+pub fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 

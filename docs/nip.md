@@ -72,7 +72,7 @@ Addressable; `d` is the name.
     ["d", "alice@example.org"],
     ["p", "<subject pubkey>"],              // one or more
     ["expiration", "1797776000"],           // NIP-40, REQUIRED
-    ["usage", "sign"],                      // zero or more of sign, encrypt, ca
+    ["usage", "sign"],                      // zero or more of sign, encrypt, ca, x509
     ["usage", "encrypt"],
     ["relay", "wss://relay.example.org"]    // optional hints, where the subject reads
   ],
@@ -88,11 +88,23 @@ Addressable; `d` is the name.
   later `created_at`, which replaces the old one on conforming relays.
 - `usage`: what the subject's keys may be used for. `sign` and `encrypt`
   are hints to applications; `ca` makes the certificate a sub-issuer
-  certificate (below). Absent `usage` means `sign` and `encrypt`.
+  certificate (below); `x509` makes it the domain's X.509 root statement
+  (below). **No `usage` tag at all** means `sign` and `encrypt`. A client
+  MUST treat a `usage` value it does not know as a usage it does not
+  allow: a certificate whose usages are all unknown to the client allows
+  nothing the client knows, and is never read as a plain key.
 - `content`: empty, or a JSON object with display fields (`name`,
-  `about`, `picture`). Never a security input.
-- A certificate for `_@<domain>` names the domain's own keys (its
-  services) or, with `usage` `ca`, a sub-issuer for the domain.
+  `about`, `picture`); for `usage` `x509`, the base64 DER below. Never a
+  security input except through the `x` tag.
+- `x`: the SHA-256, hex, of the DER that `content` decodes to (the root
+  certificate's usual fingerprint), REQUIRED with `usage` `x509`.
+- **Reserved names.** A local part starting with `_` is a statement of
+  the domain about itself, not a person: `_@<domain>` names the domain's
+  own keys (its services) or, with `usage` `ca`, a sub-issuer for the
+  domain; `_x509@<domain>` is its X.509 root statement. Issuers MUST NOT
+  issue other `_…` names. A reserved name other than the apex is never a
+  person: clients MUST NOT list it among the names a key holds, nor
+  encrypt to it, nor present it as an identity.
 
 Clients query `{"kinds":[37200], "#d":["alice@example.org"]}` to go from
 name to key and `{"kinds":[37200], "#p":["<pubkey>"]}` to go from key to
@@ -116,6 +128,29 @@ issuer can only delegate what it holds. Examples:
 
 An optional `["pathlen", "<n>"]` on a sub-issuer certificate limits how
 many further sub-issuer certificates may follow below it (`0`: none).
+
+## The X.509 root statement
+
+A domain that runs TLS services on the overlay publishes the root of
+its own X.509 CA as a certificate for `_x509@<domain>` with
+`["usage", "x509"]`, the base64 (RFC 4648) DER of the self-signed root
+certificate as `content`, and `["x", <sha256 of the DER, hex>]`. Its `p`
+keys are the nodes operating the CA (where its ACME endpoint listens).
+A client that validates this certificate's path as for any other has
+the domain's word that this X.509 root is the domain's: it decodes the
+content, checks its SHA-256 against the `x` tag, parses the DER,
+requires a self-signed CA certificate, and may install it in a TLS
+trust store. How the CA issues TLS certificates is outside this NIP; the
+reference implementation runs an ACME server reachable over the overlay
+only.
+
+Compatibility: a client written to this revision meets the event as a
+certificate with a usage it may not know, which allows nothing, under a
+reserved name, which is not a person; the event is inert to it. A client
+of the reference implementation's 0.1.0, which predates both rules,
+reads it as a plain sign+encrypt certificate for the operating node's
+key under the name `_x509@<domain>`; no such verifier was deployed, and
+the rules above exist so that it cannot happen again.
 
 ## Path validation
 

@@ -21,11 +21,15 @@ pub enum CertError {
     Expiration,
     #[error("invalid pathlen tag")]
     Pathlen,
+    #[error("missing or invalid x tag (the content's SHA-256), required with usage x509")]
+    Digest,
     #[error("too many tags")]
     TooLarge,
 }
 
-/// What a subject's keys may be used for. Unknown values are ignored.
+/// What a subject's keys may be used for. Unknown values are kept
+/// verbatim in [`Certificate::other_usages`], so that a certificate meant
+/// for something this client does not know is not read as a plain key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Usage {
@@ -34,6 +38,11 @@ pub enum Usage {
     /// The subject is a sub-issuer for names under the certificate's
     /// domain (`d` must be `_@<domain>`).
     Ca,
+    /// The certificate's content is an X.509 CA certificate (base64 DER)
+    /// whose SHA-256 is the `x` tag; the subject keys are the nodes
+    /// operating it (`d` must be `_x509@<domain>`). The TLS bridge
+    /// (docs/roadmap.md).
+    X509,
 }
 
 impl Usage {
@@ -42,6 +51,7 @@ impl Usage {
             "sign" => Some(Self::Sign),
             "encrypt" => Some(Self::Encrypt),
             "ca" => Some(Self::Ca),
+            "x509" => Some(Self::X509),
             _ => None,
         }
     }
@@ -51,6 +61,7 @@ impl Usage {
             Self::Sign => "sign",
             Self::Encrypt => "encrypt",
             Self::Ca => "ca",
+            Self::X509 => "x509",
         }
     }
 }
@@ -58,7 +69,7 @@ impl Usage {
 impl std::str::FromStr for Usage {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::parse(s).ok_or_else(|| format!("{s}: usage is sign, encrypt or ca"))
+        Self::parse(s).ok_or_else(|| format!("{s}: usage is sign, encrypt, ca or x509"))
     }
 }
 
@@ -77,8 +88,21 @@ pub struct Certificate {
     pub subjects: Vec<Npub>,
     /// Unix seconds (NIP-40); the certificate is unusable from then on.
     pub expiration: u64,
-    /// As published; empty means `sign` and `encrypt` ([`Certificate::allows`]).
+    /// The known usages, as published. No `usage` tag at all means `sign`
+    /// and `encrypt` ([`Certificate::allows`]).
     pub usages: Vec<Usage>,
+    /// Usage values this client does not know, verbatim: they count as
+    /// usages (the certificate allows nothing this client knows unless a
+    /// known one is listed too) and are written back by [`Certificate::tags`].
+    /// Defaults when read from a file written before it existed.
+    #[serde(default)]
+    pub other_usages: Vec<String>,
+    /// The `x` tag: SHA-256 of the DER the content decodes to, required
+    /// with `usage x509` and checked by a client before it trusts the
+    /// root. Carried but meaningless on other certificates; a malformed
+    /// one is fatal only with `usage x509`.
+    #[serde(default)]
+    pub digest: Option<[u8; 32]>,
     /// A revocation marker replacing the certificate, with its reason.
     pub revoked: Option<String>,
     /// How many sub-issuer certificates may follow below this one.
@@ -119,15 +143,18 @@ impl Certificate {
             .and_then(|v| v.parse::<u64>().ok())
             .ok_or(CertError::Expiration)?;
         let mut usages = Vec::new();
-        for u in ev
-            .tags
-            .iter()
-            .filter(|t| t.len() >= 2 && t[0] == "usage")
-            .filter_map(|t| Usage::parse(&t[1]))
-        {
-            if !usages.contains(&u) {
-                usages.push(u);
+        let mut other_usages: Vec<String> = Vec::new();
+        for t in ev.tags.iter().filter(|t| t.len() >= 2 && t[0] == "usage") {
+            match Usage::parse(&t[1]) {
+                Some(u) if !usages.contains(&u) => usages.push(u),
+                Some(_) => {}
+                None if !other_usages.contains(&t[1]) => other_usages.push(t[1].clone()),
+                None => {}
             }
+        }
+        let digest = tag_value(&ev.tags, "x").and_then(crate::sig::hex_digest);
+        if usages.contains(&Usage::X509) && digest.is_none() {
+            return Err(CertError::Digest);
         }
         let revoked = ev
             .tags
@@ -151,6 +178,8 @@ impl Certificate {
             subjects,
             expiration,
             usages,
+            other_usages,
+            digest,
             revoked,
             pathlen,
             relays,
@@ -169,6 +198,12 @@ impl Certificate {
         for u in &self.usages {
             tags.push(vec!["usage".into(), u.as_str().into()]);
         }
+        for u in &self.other_usages {
+            tags.push(vec!["usage".into(), u.clone()]);
+        }
+        if let Some(d) = &self.digest {
+            tags.push(vec!["x".into(), crate::sig::hex_encode(d)]);
+        }
         if let Some(reason) = &self.revoked {
             tags.push(vec!["revoked".into(), reason.clone()]);
         }
@@ -181,14 +216,21 @@ impl Certificate {
         tags
     }
 
-    /// Does the certificate allow `usage`? Absent `usage` tags mean
-    /// `sign` and `encrypt`; `ca` is never implied.
+    /// Does the certificate allow `usage`? No `usage` tag at all means
+    /// `sign` and `encrypt`; `ca` and `x509` are never implied; a
+    /// certificate whose usages this client does not know allows nothing
+    /// it knows.
     pub fn allows(&self, usage: Usage) -> bool {
-        if self.usages.is_empty() {
+        if self.usages.is_empty() && self.other_usages.is_empty() {
             matches!(usage, Usage::Sign | Usage::Encrypt)
         } else {
             self.usages.contains(&usage)
         }
+    }
+
+    /// The X.509 root statement: `_x509@<domain>` with `usage x509`.
+    pub fn is_x509(&self) -> bool {
+        self.name.is_x509() && self.allows(Usage::X509)
     }
 
     /// A sub-issuer certificate: `_@<domain>` with `usage` `ca`.
@@ -236,6 +278,8 @@ mod tests {
             revoked: None,
             pathlen: None,
             relays: Vec::new(),
+            other_usages: Vec::new(),
+            digest: None,
             created_at: NOW,
         }
     }
@@ -312,9 +356,12 @@ mod tests {
         assert!(!p.is_live_at(NOW), "a marker is never live");
         let mut unknown = ev.clone();
         unknown.tags.push(vec!["usage".into(), "fly".into()]);
-        assert_eq!(
-            Certificate::parse(&unknown).unwrap().usages,
-            vec![Usage::Ca]
+        let u = Certificate::parse(&unknown).unwrap();
+        assert_eq!(u.usages, vec![Usage::Ca]);
+        assert_eq!(u.other_usages, vec!["fly"]);
+        assert!(
+            u.tags()
+                .contains(&vec!["usage".to_string(), "fly".to_string()])
         );
         let mut bad = ev.clone();
         bad.tags.iter_mut().find(|t| t[0] == "pathlen").unwrap()[1] = "-1".into();
@@ -329,6 +376,60 @@ mod tests {
             Certificate::parse(&bare).unwrap().revoked.as_deref(),
             Some("")
         );
+    }
+
+    #[test]
+    fn unknown_usages_allow_nothing_known_and_absent_means_sign_encrypt() {
+        let mut only_unknown = event(&cert("alice@example.org", &[]));
+        only_unknown
+            .tags
+            .push(vec!["usage".into(), "teleport".into()]);
+        let c = Certificate::parse(&only_unknown).unwrap();
+        assert!(c.usages.is_empty() && c.other_usages == ["teleport"]);
+        assert!(
+            !c.allows(Usage::Sign) && !c.allows(Usage::Encrypt),
+            "a certificate for something this client does not know is not a plain key"
+        );
+        let mut mixed = only_unknown.clone();
+        mixed.tags.push(vec!["usage".into(), "sign".into()]);
+        let m = Certificate::parse(&mixed).unwrap();
+        assert!(m.allows(Usage::Sign) && !m.allows(Usage::Encrypt));
+        let none = Certificate::parse(&event(&cert("alice@example.org", &[]))).unwrap();
+        assert!(none.allows(Usage::Sign) && none.allows(Usage::Encrypt));
+    }
+
+    #[test]
+    fn x509_needs_its_digest_and_its_reserved_name() {
+        let mut root = cert("_x509@example.org", &[Usage::X509]);
+        root.digest = Some(crate::sig::digest(b"DER"));
+        let ev = event(&root);
+        let p = Certificate::parse(&ev).unwrap();
+        assert_eq!(p, root);
+        assert!(p.is_x509() && p.allows(Usage::X509) && !p.allows(Usage::Sign));
+        assert!(p.tags().iter().any(|t| t[0] == "x" && t[1].len() == 64));
+        let mut no_x = ev.clone();
+        no_x.tags.retain(|t| t[0] != "x");
+        assert_eq!(Certificate::parse(&no_x), Err(CertError::Digest));
+        let mut bad_x = ev.clone();
+        bad_x.tags.iter_mut().find(|t| t[0] == "x").unwrap()[1] = "zz".into();
+        assert_eq!(Certificate::parse(&bad_x), Err(CertError::Digest));
+        // The tag without the usage is carried but means nothing, and a
+        // malformed one is not fatal there: another extension's `x` must
+        // not cost alice her certificate.
+        let mut plain = cert("alice@example.org", &[]);
+        plain.digest = Some([9; 32]);
+        let q = Certificate::parse(&event(&plain)).unwrap();
+        assert_eq!(q.digest, Some([9; 32]));
+        assert!(!q.is_x509());
+        let mut odd = event(&plain);
+        odd.tags.iter_mut().find(|t| t[0] == "x").unwrap()[1] = "not-hex".into();
+        let o = Certificate::parse(&odd).unwrap();
+        assert_eq!(o.digest, None);
+        assert!(o.allows(Usage::Sign));
+        // x509 on another name is not the root statement.
+        let mut elsewhere = cert("_@example.org", &[Usage::X509]);
+        elsewhere.digest = Some([1; 32]);
+        assert!(!Certificate::parse(&event(&elsewhere)).unwrap().is_x509());
     }
 
     #[test]

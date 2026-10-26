@@ -22,7 +22,7 @@ pub mod store;
 pub mod verifier;
 
 pub use config::Config;
-pub use issuer::{Issued, Issuer, Request, publish_events, sign_at};
+pub use issuer::{Issued, Issuer, Request, publish_events, root_digest, sign_at};
 pub use pubdom_resolve;
 pub use pubdom_resolve::nostr_sdk;
 pub use pubdom_resolve::relay::load_keys;
@@ -68,6 +68,8 @@ mod tests {
             revoked: None,
             pathlen: None,
             relays: Vec::new(),
+            other_usages: Vec::new(),
+            digest: None,
             created_at: 0,
         };
         let ev = sign_event(&keys, KIND_CERT, cert.tags(), "").unwrap();

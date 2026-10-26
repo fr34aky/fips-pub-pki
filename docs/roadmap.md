@@ -38,6 +38,17 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
 
 ## Next, in order
 
+0. **TLS on the mesh (the X.509 bridge)**, decided with the user
+   2026-10-26, in four PRs: (1) the protocol pieces — `usage x509`, the
+   `x` tag, the reserved name `_x509@<domain>`, the unknown-usage rule
+   — **done**; (2) the `pubpki-acme` crate: JWS, allowlist and
+   identifier policy, the X.509 root and issuing, the zone reader, the
+   state store; (3) the ACME server listening on the CA node's fips
+   address, the mesh connection as the proof, an integration test with
+   a real ACME client on loopback; (4) `fips-pubpki acme init|serve|
+   allow|deny|list|status`, `fips-pubpki trust`, the unit, `docs/acme.md`
+   and the other guides.
+
 1. **Live** (each on the user's word): a `_fips-ca` record for the demo
    domain and an issuer claim with its chain; certificates on the mesh
    relay; an offline verification on the second node with no Internet;

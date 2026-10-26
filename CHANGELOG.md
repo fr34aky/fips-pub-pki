@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Protocol: `usage x509` and the `x` tag (the content's SHA-256) for the
+  domain's X.509 root statement under the reserved name
+  `_x509@<domain>`; local parts starting with `_` are reserved
+  (`Name::is_reserved`, `Name::x509`, `Certificate::is_x509`,
+  `Certificate::digest`); `Request::x509_root` builds it, `root_digest`
+  computes the tag from the content. Groundwork for the ACME server
+  (docs/roadmap.md).
+
 - The repository: workspace of `pubpki-core`, `pubpki` and `pubpki-cli`
   (`fips-pubpki`), on `pubdom-core` and `pubdom-resolve` pinned by
   commit; CI as in fips-pub-domains (fmt, clippy, tests on three
@@ -64,3 +72,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failing bundle counts.
 - Documentation: `docs/how-it-works.md`, `docs/install.md`,
   `docs/issuer.md`, `docs/users.md`.
+
+### Changed
+
+- A `usage` value the client does not know is kept
+  (`Certificate::other_usages`) and counts as a usage: a certificate
+  whose usages are all unknown allows nothing, instead of being read as
+  a plain sign+encrypt key. Only a certificate with no `usage` tag at
+  all implies `sign` and `encrypt`. `Issuer::renew` and `revoke` take
+  the event and carry its content. A reserved name other than the apex
+  is never a person: `names_of` does not list it, `nostr-json` does not
+  emit it, `encrypt` refuses it. `ca status` and `resolve` print unknown
+  usages too.
