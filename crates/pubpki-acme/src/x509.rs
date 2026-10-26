@@ -501,7 +501,11 @@ mod tests {
             pem.starts_with("-----BEGIN CERTIFICATE-----\n")
                 && pem.ends_with("-----END CERTIFICATE-----\n")
         );
-        assert_eq!(pem, root.pem());
+        assert_eq!(
+            pem,
+            root.pem().replace("\r\n", "\n"),
+            "rcgen writes CRLF on Windows; ours is LF everywhere"
+        );
         assert_eq!(
             check_root_content(&content, &[0; 32], NOW).unwrap_err(),
             TrustError::Digest
