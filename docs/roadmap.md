@@ -43,7 +43,7 @@ recorded here and in [testing.md](testing.md). Dates are absolute.
    `x` tag, the reserved name `_x509@<domain>`, the unknown-usage rule
    — **done**; (2) the `pubpki-acme` crate: JWS, allowlist and
    identifier policy, the X.509 root and issuing, the zone reader, the
-   state store; (3) the ACME server listening on the CA node's fips
+   state store — **done**; (3) the ACME server listening on the CA node's fips
    address, the mesh connection as the proof, an integration test with
    a real ACME client on loopback; (4) `fips-pubpki acme init|serve|
    allow|deny|list|status`, `fips-pubpki trust`, the unit, `docs/acme.md`

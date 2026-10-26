@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `pubpki-acme` crate (desktop only): the policy and crypto of the
+  ACME server to come — the flattened-JWS verifier (ES256, RS256,
+  EdDSA, RFC 7638 thumbprints), the allowlist and the peer-address
+  table, identifier approval against the domain's zone record, the
+  order, account and revocation rules, the nonce pool, the P-256 root
+  and leaf issuing with rcgen, the root check for `trust`, the zone-file
+  reader and relay fetch, the state directory. No sockets yet.
 - Protocol: `usage x509` and the `x` tag (the content's SHA-256) for the
   domain's X.509 root statement under the reserved name
   `_x509@<domain>`; local parts starting with `_` are reserved

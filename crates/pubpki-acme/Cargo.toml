@@ -1,0 +1,35 @@
+[package]
+name = "pubpki-acme"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "An ACME server for TLS certificates on the fips mesh: the mesh connection is the proof, the X.509 root is published through the PKI"
+
+# Desktop only (docs/architecture.md): this crate is not embedded by the
+# phone, so it may use anything. It is outside CI's portability checks.
+[dependencies]
+pubpki.workspace = true
+pubpki-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9"
+thiserror.workspace = true
+tracing.workspace = true
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+time = "0.3"
+rcgen = { version = "0.14", features = ["x509-parser"] }
+rustls-pki-types = "1"
+x509-parser = "0.18"
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+ecdsa = { version = "0.16", default-features = false, features = ["verifying", "std"] }
+signature = "2"
+rsa = { version = "0.9", default-features = false, features = ["std", "sha2"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "fast"] }
+num-bigint-dig = { version = "0.8", default-features = false }
+tokio = { version = "1", features = ["fs", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }

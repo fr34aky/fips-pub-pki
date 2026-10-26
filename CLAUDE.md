@@ -53,6 +53,7 @@ of this repository moves into fips-pub-domains, fips2go or fips.
 ```
 crates/pubpki-core   policy, no I/O: names, certificates, scope, path validation
 crates/pubpki        I/O through pubdom-resolve; NIP-44
+crates/pubpki-acme    the ACME server for TLS on the mesh (desktop only, not portable-checked)
 crates/pubpki-cli    fips-pubpki
 docs/                nip, spec, architecture, design-history, roadmap, testing
 ```

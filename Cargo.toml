@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pubpki-core", "crates/pubpki", "crates/pubpki-cli"]
+members = ["crates/pubpki-core", "crates/pubpki", "crates/pubpki-acme", "crates/pubpki-cli"]
 
 [workspace.package]
 # One version for every crate and binary; a release is this number, a
@@ -13,6 +13,7 @@ repository = "https://github.com/fr34aky/fips-pub-pki"
 [workspace.dependencies]
 pubpki-core = { path = "crates/pubpki-core" }
 pubpki = { path = "crates/pubpki" }
+pubpki-acme = { path = "crates/pubpki-acme" }
 # The issuer binding and the relay client come from fips-pub-domains,
 # pinned by commit as fips2go pins them. Bump both together.
 pubdom-core = { git = "https://github.com/fr34aky/fips-pub-domains", rev = "e6da51e148e719edd69b6fde5c80cc370e21ae49" }
