@@ -120,6 +120,18 @@ A key named by a certificate is used like any Nostr key, with two rules:
   certificate's `usage` says whether a key is for signing, encryption or
   both.
 
+## TLS on the mesh
+
+A browser needs X.509. The domain's CA runs an ACME server that listens
+on its node's fips address only; a connection from `fd…` can only come
+from the key that address is derived from, so the server knows which
+node is asking without a challenge, and an allowlist says who may. A
+node gets a certificate for its `<npub>.fips` name and for the names
+the domain's zone maps to it. The CA's X.509 root is a statement of the
+domain about itself, `_x509@<domain>`, published and verified like any
+certificate; `fips-pubpki trust` turns a verified statement into a PEM
+for the trust store. [acme.md](acme.md).
+
 ## What is where
 
 | | the issuer's machine | a user's machine |
@@ -127,7 +139,8 @@ A key named by a certificate is used like any Nostr key, with two rules:
 | configuration | `/etc/fips-pubpki/config.yaml` (`ca_*` keys) | `/etc/fips-pubpki/config.yaml` |
 | secret | `/etc/fips-pubpki/ca.key` | the user's own key (`key:`) |
 | state | `/var/lib/fips-pubpki/issued.json`: what was issued | `/var/lib/fips-pubpki/issuers.json`: pins, newest-seen, kept certificates |
-| service | `fips-pubpki-ca.service`: renew and re-publish | none |
+| service | `fips-pubpki-ca.service`: renew and re-publish; `fips-pubpki-acme.service`: TLS certificates for the domain's nodes | none |
+| X.509 | `/etc/fips-pubpki/x509-root.{key,crt}`, `/var/lib/fips-pubpki/acme/` | the root PEM `trust` exported, in the trust store |
 | talks to | relays (publish), DNS (the chain, at publish time) | relays (fetch); never DNS |
 
 ## Behaviour in one table

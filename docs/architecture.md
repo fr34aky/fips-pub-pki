@@ -59,15 +59,18 @@ a proxy or a host route from another interface.
 
 ### pubpki-cli
 
-`fips-pubpki`, one file over `pubpki`: `ca init|issue|issue-ca|renew
-[--watch]|revoke|publish|status [--dns]`, `issuer add|remove|list`,
-`resolve`, `names`, `verify <file>` (a bundle or one event), `bundle`,
-`sign`, `verify-sig`, `encrypt`, `decrypt`, `nostr-json`, `config`.
+`fips-pubpki`, `main.rs` over `pubpki` and `acme.rs` over `pubpki-acme`:
+`ca init|issue|issue-ca|renew [--watch]|revoke|publish|status [--dns]`,
+`issuer add|remove|list`, `resolve`, `names`, `verify <file>` (a bundle
+or one event), `bundle`, `sign`, `verify-sig`, `encrypt`, `decrypt`,
+`nostr-json`, `config`, `acme init|serve|allow|deny|list|status`,
+`trust <domain> [--bundle FILE] [-o FILE]`.
 Config `/etc/fips-pubpki/config.yaml`; the issuer key is its own file
 (`ca_key`, written by `ca init` with mode 0600), never the node key.
-`ca status --dns` and `ca publish` are the only commands that touch the
-legacy DNS, and they are the issuer's. The renewal unit is
-`packaging/systemd/fips-pubpki-ca.service`.
+`ca status --dns`, `ca publish` and `acme serve` (the `_fips-dns` lookup
+for the zone's servers, once at start) are the only commands that touch
+the legacy DNS, and they are the issuer's. The units are
+`packaging/systemd/fips-pubpki-ca.service` and `fips-pubpki-acme.service`.
 
 ### Dependencies
 

@@ -197,6 +197,14 @@ the marker.
 - A **bare key**: tell the people who pinned it (`fips-pubpki issuer
   remove`); there is nobody else to tell.
 
+## TLS for the domain's services
+
+A web server or relay on a node of yours gets a TLS certificate for
+`relay.example.org` and `<npub>.fips` from your own CA with any ACME
+client, and the browsers on the mesh trust it through the PKI:
+`fips-pubpki acme init`, `acme allow <npub>` per node, the
+`fips-pubpki-acme` unit. The whole of it is [acme.md](acme.md).
+
 ## Witnesses
 
 A verifier with no DNSSEC chain to check (unsigned zone, or a client

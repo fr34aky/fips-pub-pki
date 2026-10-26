@@ -135,7 +135,8 @@ A domain that runs TLS services on the overlay publishes the root of
 its own X.509 CA as a certificate for `_x509@<domain>` with
 `["usage", "x509"]`, the base64 (RFC 4648) DER of the self-signed root
 certificate as `content`, and `["x", <sha256 of the DER, hex>]`. Its `p`
-keys are the nodes operating the CA (where its ACME endpoint listens).
+keys are the nodes operating the CA; the reference implementation's ACME
+directory is `http://[<node's overlay address>]:8555/directory`.
 A client that validates this certificate's path as for any other has
 the domain's word that this X.509 root is the domain's: it decodes the
 content, checks its SHA-256 against the `x` tag, parses the DER,

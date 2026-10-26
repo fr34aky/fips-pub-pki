@@ -1104,24 +1104,3 @@ async fn revoke(State(state): State<Arc<AppState>>, req: axum::extract::Request)
         Ok(Reply::empty(StatusCode::OK))
     })
 }
-
-/// For the CLI's `acme status`: what the tables hold.
-pub struct Summary {
-    pub accounts: usize,
-    pub live_orders: usize,
-    pub certificates: usize,
-    pub revoked: usize,
-}
-
-impl AppState {
-    pub async fn summary(&self) -> Summary {
-        let inner = self.inner.lock().await;
-        let t = now();
-        Summary {
-            accounts: inner.accounts.len(),
-            live_orders: inner.orders.iter().filter(|o| !o.is_expired(t)).count(),
-            certificates: inner.index.len(),
-            revoked: inner.index.iter().filter(|e| e.revoked.is_some()).count(),
-        }
-    }
-}

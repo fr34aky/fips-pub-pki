@@ -2050,6 +2050,7 @@ dependencies = [
  "anyhow",
  "clap",
  "pubpki",
+ "pubpki-acme",
  "serde_json",
  "tokio",
  "tracing",
